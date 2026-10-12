@@ -12,6 +12,7 @@
 #include "shared/rt64_rdp_tile.h"
 #include "shared/rt64_render_indices.h"
 #include "shared/rt64_render_params.h"
+#include "shared/rt64_texture_array.h"
 
 #ifdef RT64_NO_NONUNIFORM_INDEXING
 #define RT64_RESOURCE_INDEX(i) (i)
@@ -46,10 +47,10 @@ SamplerState gNearestClampMirrorSampler : register(s23, space0);
 SamplerState gNearestClampClampSampler : register(s24, space0);
 
 // Set 1 - RGBA32 texture cache.
-Texture2D<float4> gTextures[8192] : register(t0, space1);
+Texture2D<float4> gTextures[RT64_TEXTURE_ARRAY_SIZE] : register(t0, space1);
 
 // Set 2 - TMEM texture cache.
-Texture1D<uint> gTMEM[8192] : register(t0, space2);
+Texture1D<uint> gTMEM[RT64_TEXTURE_ARRAY_SIZE] : register(t0, space2);
 
 // Set 3 - Framebuffer.
 ConstantBuffer<FramebufferParams> FbParams : register(b0, space3);

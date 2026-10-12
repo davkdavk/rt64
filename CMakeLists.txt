@@ -114,6 +114,12 @@ set(ANDROID_ABI arm64-v8a)
 
 # For DXC
 set (DXC_COMMON_OPTS "-I${PROJECT_SOURCE_DIR}/src")
+if(WR64_ANDROID_NO_NONUNIFORM_INDEXING)
+    list(APPEND DXC_COMMON_OPTS "-D" "RT64_NO_NONUNIFORM_INDEXING")
+endif()
+if(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+    list(APPEND DXC_COMMON_OPTS "-D" "RT64_NO_DESCRIPTOR_INDEXING")
+endif()
 set (DXC_DXIL_OPTS "-Wno-ignored-attributes")
 set (DXC_SPV_OPTS "-spirv" "-fspv-target-env=vulkan1.0" "-fvk-use-dx-layout")
 set (DXC_LB_OPTS "${DXC_COMMON_OPTS}" "-D" "LIBRARY" "-T" "lib_6_3")

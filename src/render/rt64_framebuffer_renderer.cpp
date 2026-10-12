@@ -223,6 +223,11 @@ namespace RT64 {
         textureCacheTextureReplacements = textureCache->textureMap.textureReplacements;
         textureCacheFreeSpaces = textureCache->textureMap.freeSpaces;
         textureCacheSize = static_cast<uint32_t>(textureCacheTextures.size());
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+        textureCacheSize = std::min(textureCacheSize, uint32_t(RT64_TEXTURE_ARRAY_SIZE_FIXED));
+        textureCacheFreeSpaces.erase(std::remove_if(textureCacheFreeSpaces.begin(), textureCacheFreeSpaces.end(),
+            [](uint32_t index) { return index >= RT64_TEXTURE_ARRAY_SIZE_FIXED; }), textureCacheFreeSpaces.end());
+#endif
         textureCacheGlobalVersion = textureCache->textureMap.globalVersion;
         textureCacheReplacementMapEnabled = textureCache->textureMap.replacementMapEnabled;
         dynamicTextureViewVector.clear();
@@ -285,7 +290,17 @@ namespace RT64 {
     uint32_t FramebufferRenderer::getDestinationIndex() {
         uint32_t dstIndex;
         if (textureCacheFreeSpaces.empty()) {
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+            static uint64_t evictionCount = 0;
+            dstIndex = textureCacheEvictionCursor++ % RT64_TEXTURE_ARRAY_SIZE_FIXED;
+            ++evictionCount;
+            if ((evictionCount == 1) || ((evictionCount % 60) == 0)) {
+                fprintf(stderr, "RT64 texture cache eviction count=%llu slot=%u\n",
+                    static_cast<unsigned long long>(evictionCount), dstIndex);
+            }
+#else
             dstIndex = textureCacheSize++;
+#endif
         }
         else {
             dstIndex = textureCacheFreeSpaces.back();
@@ -320,6 +335,15 @@ namespace RT64 {
         if (createSet) {
             descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, ((textureCacheSize + 1) * 3) / 2);
         }
+
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+        // PARTIALLY_BOUND is unavailable on this device. Initialize every fixed
+        // descriptor slot with a valid image before replacing live cache slots.
+        for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+            descTextureSet->setTexture(i, dummyColorTarget.get(), RenderTextureLayout::SHADER_READ,
+                dummyColorTargetView.get());
+        }
+#endif
 
         if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
             descriptorTextureVersions.clear();

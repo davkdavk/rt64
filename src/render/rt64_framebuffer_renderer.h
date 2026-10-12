@@ -65,6 +65,7 @@ namespace RT64 {
         std::vector<Texture *> textureCacheTextureReplacements;
         std::vector<uint32_t> textureCacheFreeSpaces;
         uint32_t textureCacheSize = 0;
+        uint32_t textureCacheEvictionCursor = 0;
         uint32_t textureCacheGlobalVersion = 0;
         bool textureCacheReplacementMapEnabled = false;
         std::vector<InstanceDrawCall> instanceDrawCallVector;
