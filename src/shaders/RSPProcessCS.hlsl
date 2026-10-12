@@ -101,7 +101,7 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
         float3 resultColor = rspLightVector[ambientIndex].col;
         for (uint i = lightIndex; i < ambientIndex; i++) {
             const RSPLight light = rspLightVector[i];
-            if (light.attenuation.x > 0) {
+            if (light.kc > 0) {
                 resultColor += computePosLight(pos, norm, light, worldMat);
             }
             else {
@@ -128,7 +128,7 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
     // Convert to N64 screen position.
     const RSPViewport rspViewport = rspViewportVector[viewProjIndex];
     const float3 ndcPos = tfPos.xyz / float3(tfPos.w, -tfPos.w, tfPos.w);
-    const float4 screenPos = float4(ndcPos * rspViewport.scale.xyz + rspViewport.translate.xyz, tfPos.w);
+    const float4 screenPos = float4(ndcPos * rspViewport.scale + rspViewport.translate, tfPos.w);
     // Keep generated SPIR-V in sync with shared RSP buffer layouts.
     dstPos[vertexOffsetIndex] = screenPos;
     dstTc[vertexOffsetIndex] = tc;

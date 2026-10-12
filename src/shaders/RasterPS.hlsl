@@ -145,7 +145,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
         
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
-        const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags.x) ? vertexUV : lowResUV;
+        const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
     }
     
@@ -160,7 +160,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
         
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
-        const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags.x) ? vertexUV : lowResUV;
+        const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
         texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug);
     }
@@ -177,13 +177,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     ccInputs.primColor = instanceRDPParams[instanceIndex].primColor;
     ccInputs.shadeColor = shadeColor;
     ccInputs.envColor = instanceRDPParams[instanceIndex].envColor;
-        ccInputs.keyCenter = instanceRDPParams[instanceIndex].keyCenter.xyz;
-        ccInputs.keyScale = instanceRDPParams[instanceIndex].keyScale.xyz;
+    ccInputs.keyCenter = instanceRDPParams[instanceIndex].keyCenter;
+    ccInputs.keyScale = instanceRDPParams[instanceIndex].keyScale;
     ccInputs.lodFraction = lodFraction;
     ccInputs.primLodFrac = instanceRDPParams[instanceIndex].primLOD.x;
     ccInputs.noise = nextRand(randomSeed);
-        ccInputs.K4 = (instanceRDPParams[instanceIndex].convertK[1].x / 255.0f);
-        ccInputs.K5 = (instanceRDPParams[instanceIndex].convertK[1].y / 255.0f);
+    ccInputs.K4 = (instanceRDPParams[instanceIndex].convertK[4] / 255.0f);
+    ccInputs.K5 = (instanceRDPParams[instanceIndex].convertK[5] / 255.0f);
     colorCombiner.run(ccInputs, combinerColor, alphaCompareValue);
     
 #if 0
