@@ -14,13 +14,8 @@
 namespace interop {
 #endif
     struct RSPLookAt {
-#ifdef HLSL_CPU
         float3 x;
         float3 y;
-#else
-        float4 x;
-        float4 y;
-#endif
     };
 #ifdef HLSL_CPU
 };

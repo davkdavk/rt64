@@ -12,23 +12,13 @@
 namespace interop {
 #endif
     struct RSPViewport {
-#ifdef HLSL_CPU
         float3 scale;
         float3 translate;
-#else
-        float4 scale;
-        float4 translate;
-#endif
 
         static RSPViewport identity() {
             RSPViewport viewport;
-#ifdef HLSL_CPU
             viewport.scale = float3(1.0f, 1.0f, 1.0f);
             viewport.translate = float3(0.0f, 0.0f, 0.0f);
-#else
-            viewport.scale = float4(1.0f, 1.0f, 1.0f, 0.0f);
-            viewport.translate = float4(0.0f, 0.0f, 0.0f, 0.0f);
-#endif
             return viewport;
         }
 

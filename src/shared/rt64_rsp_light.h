@@ -10,23 +10,12 @@
 namespace interop {
 #endif
     struct RSPLight {
-#ifdef HLSL_CPU
         float3 posDir;
-        float posDirPad;
         float3 col;
-        float colPad;
         float3 colc;
-        float colcPad;
         uint kc;
         uint kl;
         uint kq;
-        uint attenuationPad;
-#else
-        float4 posDir;
-        float4 col;
-        float4 colc;
-        uint4 attenuation;
-#endif
     };
 
 #ifndef HLSL_CPU
@@ -36,7 +25,7 @@ namespace interop {
         const float C = 1.0f / 32768.0f;
         const float D = 1.0f / 524288.0f;
         const float Epsilon = 1e-6f;
-        float attenuation = 1.0f / (A + B * light.attenuation.x + C * light.attenuation.y * distance + D * light.attenuation.z * pow(distance, 2.0f));
+        float attenuation = 1.0f / (A + B * light.kc + C * light.kl * distance + D * light.kq * pow(distance, 2.0f));
         attenuation = fmod(attenuation, 1.0f + Epsilon);
         return attenuation;
     }
@@ -53,24 +42,24 @@ namespace interop {
 
     float3 computePosLight(const float3 pos, const float3 norm, const RSPLight light, const float4x4 worldMatrix) {
         const float3 worldVertexPos = mul(worldMatrix, float4(pos, 1.0f)).xyz;
-        float3 worldLightDir = light.posDir.xyz - worldVertexPos;
+        float3 worldLightDir = light.posDir - worldVertexPos;
         const float worldLightDist = computeLength(worldLightDir);
         if (worldLightDist > 0) {
             worldLightDir /= worldLightDist;
         }
 
         const float3 localLightDir = mul(float4(worldLightDir, 0.0f), worldMatrix).xyz;
-        return computeNDotL(norm, localLightDir) * computeAttenuation(worldLightDist, light) * light.col.xyz;
+        return computeNDotL(norm, localLightDir) * computeAttenuation(worldLightDist, light) * light.col;
     }
 
     float3 computeDirLight(const float3 norm, const RSPLight light, const float4x4 worldMatrix) {
-        float3 localLightDir = mul(float4(light.posDir.xyz, 0.0f), worldMatrix).xyz;
+        float3 localLightDir = mul(float4(light.posDir, 0.0f), worldMatrix).xyz;
         float localLightLength = length(localLightDir);
         if (localLightLength > 0) {
             localLightDir /= localLightLength;
         }
 
-        return max(dot(norm, localLightDir), 0.0f) * light.col.xyz;
+        return max(dot(norm, localLightDir), 0.0f) * light.col;
     }
 #endif
 #ifdef HLSL_CPU

@@ -208,8 +208,8 @@ namespace RT64 {
         }
 
         if (drawStatus.isChanged(DrawAttribute::Key)) {
-            drawCall.rdpParams.keyCenter = { rdp->keyCenter.x, rdp->keyCenter.y, rdp->keyCenter.z, 0.0f };
-            drawCall.rdpParams.keyScale = { rdp->keyScale.x, rdp->keyScale.y, rdp->keyScale.z, 0.0f };
+            drawCall.rdpParams.keyCenter = rdp->keyCenter;
+            drawCall.rdpParams.keyScale = rdp->keyScale;
         }
 
         if (drawStatus.isChanged(DrawAttribute::Scissor)) {
