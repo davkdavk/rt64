@@ -13,6 +13,12 @@
 #include "shared/rt64_render_indices.h"
 #include "shared/rt64_render_params.h"
 
+#ifdef RT64_NO_NONUNIFORM_INDEXING
+#define RT64_RESOURCE_INDEX(i) (i)
+#else
+#define RT64_RESOURCE_INDEX(i) NonUniformResourceIndex(i)
+#endif
+
 // Set 0 - Global resources and Enhancements (Raytracing or other).
 ConstantBuffer<FrameParams> FrParams : register(b1, space0);
 StructuredBuffer<RDPParams> instanceRDPParams : register(t2, space0);

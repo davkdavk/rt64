@@ -669,6 +669,14 @@ namespace RT64 {
         }
 #   endif
 
+        // The queues wait on one another's IDs and interpolation counters.
+        // Keep both objects (including their mutexes) alive until every worker
+        // has observed shutdown and joined.
+        if (workloadQueue != nullptr) workloadQueue->requestStop();
+        if (presentQueue != nullptr) presentQueue->requestStop();
+        if (workloadQueue != nullptr) workloadQueue->joinThreads();
+        if (presentQueue != nullptr) presentQueue->joinThreads();
+
         state.reset();
         workloadQueue.reset();
         presentQueue.reset();

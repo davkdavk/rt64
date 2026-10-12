@@ -31,6 +31,13 @@ namespace RT64 {
             bool removeBlackBorders = false;
         };
 
+        // wr64: the region of the framebuffer the game draws into, in framebuffer
+        // pixels as left, top, right, bottom with right and bottom exclusive. When
+        // set, the blit fits this region to the window rather than the whole
+        // framebuffer, so a game's own black borders are not presented. All zero
+        // (the default) presents the whole framebuffer as before.
+        static hlslpp::float4 contentCrop;
+
         VIRenderer();
         ~VIRenderer();
         void render(const RenderParams &p);

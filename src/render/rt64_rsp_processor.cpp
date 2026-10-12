@@ -47,6 +47,7 @@ namespace RT64 {
         processSet->setBuffer(processSet->dstPos, p.outputBuffers->screenPosBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4));
         processSet->setBuffer(processSet->dstTc, p.outputBuffers->genTexCoordBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 2));
         processSet->setBuffer(processSet->dstCol, p.outputBuffers->shadedColBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4));
+        processSet->setBuffer(processSet->dstWorld, p.outputBuffers->rasterWorldPosBuffer.buffer.get(), RenderBufferStructuredView(sizeof(float) * 4));
 
         const uint32_t modifyCount = drawData.modifyCount();
         modifyCB.modifyCount = modifyCount;
@@ -61,13 +62,15 @@ namespace RT64 {
             RenderBufferBarrier beforeBarriers[] = {
                 RenderBufferBarrier(outputBuffers->screenPosBuffer.buffer.get(), RenderBufferAccess::WRITE),
                 RenderBufferBarrier(outputBuffers->genTexCoordBuffer.buffer.get(), RenderBufferAccess::WRITE),
-                RenderBufferBarrier(outputBuffers->shadedColBuffer.buffer.get(), RenderBufferAccess::WRITE)
+                RenderBufferBarrier(outputBuffers->shadedColBuffer.buffer.get(), RenderBufferAccess::WRITE),
+                RenderBufferBarrier(outputBuffers->rasterWorldPosBuffer.buffer.get(), RenderBufferAccess::WRITE)
             };
 
             RenderBufferBarrier afterBarriers[] = {
                 RenderBufferBarrier(outputBuffers->screenPosBuffer.buffer.get(), RenderBufferAccess::READ),
                 RenderBufferBarrier(outputBuffers->genTexCoordBuffer.buffer.get(), RenderBufferAccess::READ),
-                RenderBufferBarrier(outputBuffers->shadedColBuffer.buffer.get(), RenderBufferAccess::READ)
+                RenderBufferBarrier(outputBuffers->shadedColBuffer.buffer.get(), RenderBufferAccess::READ),
+                RenderBufferBarrier(outputBuffers->rasterWorldPosBuffer.buffer.get(), RenderBufferAccess::READ)
             };
 
             const int dispatchCount = (processCB.vertexCount + ThreadGroupSize - 1) / ThreadGroupSize;

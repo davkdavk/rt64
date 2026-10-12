@@ -13,6 +13,12 @@
 #include "shaders/RasterPSSpecConstantMS.hlsl.spirv.h"
 #include "shaders/RasterPSSpecConstantFlat.hlsl.spirv.h"
 #include "shaders/RasterPSSpecConstantFlatMS.hlsl.spirv.h"
+#include "shaders/RasterPSDynamicNoDualSrc.hlsl.spirv.h"
+#include "shaders/RasterPSDynamicMSNoDualSrc.hlsl.spirv.h"
+#include "shaders/RasterPSSpecConstantNoDualSrc.hlsl.spirv.h"
+#include "shaders/RasterPSSpecConstantMSNoDualSrc.hlsl.spirv.h"
+#include "shaders/RasterPSSpecConstantFlatNoDualSrc.hlsl.spirv.h"
+#include "shaders/RasterPSSpecConstantFlatMSNoDualSrc.hlsl.spirv.h"
 #include "shaders/RasterVSDynamic.hlsl.spirv.h"
 #include "shaders/RasterVSSpecConstant.hlsl.spirv.h"
 #include "shaders/RasterVSSpecConstantFlat.hlsl.spirv.h"
@@ -74,12 +80,20 @@ namespace RT64 {
         rasterPSMS.parse(RasterPSSpecConstantMSBlobSPIRV, std::size(RasterPSSpecConstantMSBlobSPIRV));
         rasterPSFlat.parse(RasterPSSpecConstantFlatBlobSPIRV, std::size(RasterPSSpecConstantFlatBlobSPIRV));
         rasterPSFlatMS.parse(RasterPSSpecConstantFlatMSBlobSPIRV, std::size(RasterPSSpecConstantFlatMSBlobSPIRV));
+        rasterPSNoDualSrc.parse(RasterPSSpecConstantNoDualSrcBlobSPIRV, std::size(RasterPSSpecConstantNoDualSrcBlobSPIRV));
+        rasterPSMSNoDualSrc.parse(RasterPSSpecConstantMSNoDualSrcBlobSPIRV, std::size(RasterPSSpecConstantMSNoDualSrcBlobSPIRV));
+        rasterPSFlatNoDualSrc.parse(RasterPSSpecConstantFlatNoDualSrcBlobSPIRV, std::size(RasterPSSpecConstantFlatNoDualSrcBlobSPIRV));
+        rasterPSFlatMSNoDualSrc.parse(RasterPSSpecConstantFlatMSNoDualSrcBlobSPIRV, std::size(RasterPSSpecConstantFlatMSNoDualSrcBlobSPIRV));
         assert(!rasterVS.empty());
         assert(!rasterVSFlat.empty());
         assert(!rasterPS.empty());
         assert(!rasterPSMS.empty());
         assert(!rasterPSFlat.empty());
         assert(!rasterPSFlatMS.empty());
+        assert(!rasterPSNoDualSrc.empty());
+        assert(!rasterPSMSNoDualSrc.empty());
+        assert(!rasterPSFlatNoDualSrc.empty());
+        assert(!rasterPSFlatMSNoDualSrc.empty());
     }
 
     // RasterShader
@@ -104,12 +118,14 @@ namespace RT64 {
             const respv::Shader *PS = nullptr;
             VS = desc.flags.smoothShade ? &optimizerCacheSPIRV->rasterVS : &optimizerCacheSPIRV->rasterVSFlat;
 
-            // Pick the correct SPIR-V based on the configuration.
+            const bool dualSrcBlend = device->getCapabilities().dualSrcBlend;
             if (desc.flags.smoothShade) {
-                PS = useMSAA ? &optimizerCacheSPIRV->rasterPSMS : &optimizerCacheSPIRV->rasterPS;
+                if (dualSrcBlend) PS = useMSAA ? &optimizerCacheSPIRV->rasterPSMS : &optimizerCacheSPIRV->rasterPS;
+                else PS = useMSAA ? &optimizerCacheSPIRV->rasterPSMSNoDualSrc : &optimizerCacheSPIRV->rasterPSNoDualSrc;
             }
             else {
-                PS = useMSAA ? &optimizerCacheSPIRV->rasterPSFlatMS : &optimizerCacheSPIRV->rasterPSFlat;
+                if (dualSrcBlend) PS = useMSAA ? &optimizerCacheSPIRV->rasterPSFlatMS : &optimizerCacheSPIRV->rasterPSFlat;
+                else PS = useMSAA ? &optimizerCacheSPIRV->rasterPSFlatMSNoDualSrc : &optimizerCacheSPIRV->rasterPSFlatNoDualSrc;
             }
 
             thread_local std::vector<respv::SpecConstant> specConstants;
@@ -329,12 +345,12 @@ namespace RT64 {
         pipelineDesc.specConstants = c.specConstants.data();
         pipelineDesc.specConstantsCount = uint32_t(c.specConstants.size());
 
-        // Alpha blending is performed by using dual source blending. The blending factor will be in the secondary output.
+        const bool dualSrcBlend = c.device->getCapabilities().dualSrcBlend;
         RenderBlendDesc &targetBlend = pipelineDesc.renderTargetBlend[0];
         if (c.alphaBlend) {
             targetBlend.blendEnabled = true;
-            targetBlend.srcBlend = RenderBlend::SRC1_ALPHA;
-            targetBlend.dstBlend = RenderBlend::INV_SRC1_ALPHA;
+            targetBlend.srcBlend = dualSrcBlend ? RenderBlend::SRC1_ALPHA : RenderBlend::SRC_ALPHA;
+            targetBlend.dstBlend = dualSrcBlend ? RenderBlend::INV_SRC1_ALPHA : RenderBlend::INV_SRC_ALPHA;
             targetBlend.blendOp = RenderBlendOperation::ADD;
         }
 
@@ -424,9 +440,15 @@ namespace RT64 {
 #   endif
         case RenderShaderFormat::SPIRV:
             VSBlob = RasterVSDynamicBlobSPIRV;
-            PSBlob = useMSAA ? RasterPSDynamicMSBlobSPIRV : RasterPSDynamicBlobSPIRV;
             VSBlobSize = uint32_t(std::size(RasterVSDynamicBlobSPIRV));
-            PSBlobSize = uint32_t(useMSAA ? std::size(RasterPSDynamicMSBlobSPIRV) : std::size(RasterPSDynamicBlobSPIRV));
+            if (device->getCapabilities().dualSrcBlend) {
+                PSBlob = useMSAA ? RasterPSDynamicMSBlobSPIRV : RasterPSDynamicBlobSPIRV;
+                PSBlobSize = uint32_t(useMSAA ? std::size(RasterPSDynamicMSBlobSPIRV) : std::size(RasterPSDynamicBlobSPIRV));
+            }
+            else {
+                PSBlob = useMSAA ? RasterPSDynamicMSNoDualSrcBlobSPIRV : RasterPSDynamicNoDualSrcBlobSPIRV;
+                PSBlobSize = uint32_t(useMSAA ? std::size(RasterPSDynamicMSNoDualSrcBlobSPIRV) : std::size(RasterPSDynamicNoDualSrcBlobSPIRV));
+            }
             break;
 #   ifdef __APPLE__
         case RenderShaderFormat::METAL:

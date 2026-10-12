@@ -5,6 +5,9 @@
 #include "shared/rt64_blender.h"
 #include "shared/rt64_color_combiner.h"
 #include "shared/rt64_raster_params.h"
+// Keep generated SPIR-V in sync with shared RDPParams layout changes.
+// Keep generated SPIR-V in sync with GPUTile layout changes.
+// Keep generated SPIR-V in sync with GPUTile padding changes.
 
 #include "Depth.hlsli"
 #include "FbRendererCommon.hlsli"
@@ -142,7 +145,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
         
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
-        const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+        const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags.x) ? vertexUV : lowResUV;
         texVal0 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, false);
     }
     
@@ -157,7 +160,7 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         }
         
         const GPUTile gpuTile = GPUTiles[globalTileIndex];
-        const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags) ? vertexUV : lowResUV;
+        const float2 textureUV = gpuTileFlagHighRes(gpuTile.flags.x) ? vertexUV : lowResUV;
         const uint nativeSampler = renderFlagNativeSampler1(rp.flags);
         texVal1 = sampleTexture(otherMode, rp.flags, textureUV, ddxVertexUV, ddyVertexUV, rdpTile, gpuTile, oneCycleHardwareBug);
     }
@@ -174,13 +177,13 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
     ccInputs.primColor = instanceRDPParams[instanceIndex].primColor;
     ccInputs.shadeColor = shadeColor;
     ccInputs.envColor = instanceRDPParams[instanceIndex].envColor;
-    ccInputs.keyCenter = instanceRDPParams[instanceIndex].keyCenter;
-    ccInputs.keyScale = instanceRDPParams[instanceIndex].keyScale;
+        ccInputs.keyCenter = instanceRDPParams[instanceIndex].keyCenter.xyz;
+        ccInputs.keyScale = instanceRDPParams[instanceIndex].keyScale.xyz;
     ccInputs.lodFraction = lodFraction;
     ccInputs.primLodFrac = instanceRDPParams[instanceIndex].primLOD.x;
     ccInputs.noise = nextRand(randomSeed);
-    ccInputs.K4 = (instanceRDPParams[instanceIndex].convertK[4] / 255.0f);
-    ccInputs.K5 = (instanceRDPParams[instanceIndex].convertK[5] / 255.0f);
+        ccInputs.K4 = (instanceRDPParams[instanceIndex].convertK[1].x / 255.0f);
+        ccInputs.K5 = (instanceRDPParams[instanceIndex].convertK[1].y / 255.0f);
     colorCombiner.run(ccInputs, combinerColor, alphaCompareValue);
     
 #if 0
@@ -266,6 +269,18 @@ LIBRARY_EXPORT bool RasterPS(const RenderParams rp, float4 vertexPosition, float
         resultColor.rgb = lerp(resultColor.rgb, float3(1.0f, 0.0f, 0.0f), 0.5f);
     }
 #endif
+
+#ifdef NO_DUAL_SRC_BLEND
+    // Mali lacks dual-source blending. Carry the blend factor in the primary
+    // alpha channel and use ordinary source-alpha blending in the pipeline.
+#   ifdef DYNAMIC_RENDER_PARAMS
+    resultColor.a = resultAlpha.a;
+#   else
+    if (alphaBlend) {
+        resultColor.a = resultAlpha.a;
+    }
+#   endif
+#endif
     
     return true;
 }
@@ -291,7 +306,9 @@ void PSMain(
     , bool isFrontFace : SV_IsFrontFace
 #endif
     , [[vk::location(0)]] [[vk::index(0)]] out float4 pixelColor : SV_TARGET0
+#if !defined(NO_DUAL_SRC_BLEND)
     , [[vk::location(0)]] [[vk::index(1)]] out float4 pixelAlpha : SV_TARGET1
+#endif
 )
 {
 #if !defined(DYNAMIC_RENDER_PARAMS)
@@ -308,6 +325,8 @@ void PSMain(
     }
 
     pixelColor = resultColor;
+#if !defined(NO_DUAL_SRC_BLEND)
     pixelAlpha = resultAlpha;
+#endif
 }
 #endif

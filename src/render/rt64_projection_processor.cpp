@@ -92,7 +92,18 @@ namespace RT64 {
                 }
 
                 if (!intersectionRect.isEmpty()) {
-                    bool coversWholeWidth = (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+                    // wr64: the same tolerance as the widening test above, and it
+                    // has to be here as well. RT64 asks this question twice: once
+                    // to decide whether to render the pass across the widened
+                    // frame, and once to decide whether to widen the frustum that
+                    // fills it. Answering only the first leaves the game's 4:3
+                    // frustum stretched across a wide viewport, which is a wider
+                    // picture of the same view rather than more of the view -- it
+                    // reads as a horizontally stretched image, and that is exactly
+                    // how the warm-up round looked when only the other one was
+                    // patched.
+                    const int32_t coverTolerance = (fbPair.scissorRect.lrx - fbPair.scissorRect.ulx) / 16;
+                    bool coversWholeWidth = (intersectionRect.ulx <= fbPair.scissorRect.ulx + coverTolerance) && (intersectionRect.lrx >= fbPair.scissorRect.lrx - coverTolerance);
                     bool horizontalRatio = (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                     adjustAspectRatio = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
                 }

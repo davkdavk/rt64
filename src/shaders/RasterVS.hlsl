@@ -4,6 +4,8 @@
 
 #include "shared/rt64_other_mode.h"
 #include "shared/rt64_raster_params.h"
+// Keep generated SPIR-V in sync with shared buffer layout changes.
+// Keep generated SPIR-V in sync with RasterParams layout changes.
 #include "shared/rt64_render_flags.h"
 
 #include "FbRendererCommon.hlsli"

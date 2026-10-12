@@ -40,6 +40,7 @@ StructuredBuffer<float4x4> worldTransforms : register(t18);
 RWStructuredBuffer<float4> dstPos : register(u19);
 RWStructuredBuffer<float2> dstTc : register(u20);
 RWStructuredBuffer<float4> dstCol : register(u21);
+RWStructuredBuffer<float4> dstWorld : register(u22);
 
 [numthreads(GROUP_SIZE, 1, 1)]
 void CSMain(uint vertexIndex : SV_DispatchThreadID) {
@@ -100,7 +101,7 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
         float3 resultColor = rspLightVector[ambientIndex].col;
         for (uint i = lightIndex; i < ambientIndex; i++) {
             const RSPLight light = rspLightVector[i];
-            if (light.kc > 0) {
+            if (light.attenuation.x > 0) {
                 resultColor += computePosLight(pos, norm, light, worldMat);
             }
             else {
@@ -127,8 +128,10 @@ void CSMain(uint vertexIndex : SV_DispatchThreadID) {
     // Convert to N64 screen position.
     const RSPViewport rspViewport = rspViewportVector[viewProjIndex];
     const float3 ndcPos = tfPos.xyz / float3(tfPos.w, -tfPos.w, tfPos.w);
-    const float4 screenPos = float4(ndcPos * rspViewport.scale + rspViewport.translate, tfPos.w);
+    const float4 screenPos = float4(ndcPos * rspViewport.scale.xyz + rspViewport.translate.xyz, tfPos.w);
+    // Keep generated SPIR-V in sync with shared RSP buffer layouts.
     dstPos[vertexOffsetIndex] = screenPos;
     dstTc[vertexOffsetIndex] = tc;
     dstCol[vertexOffsetIndex] = vertexColor;
+    dstWorld[vertexOffsetIndex] = mul(worldMat, float4(pos - vel * (1.0f - gConstants.curFrameWeight), 1.0f));
 }

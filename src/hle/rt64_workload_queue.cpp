@@ -3,6 +3,8 @@
 //
 
 #include "rt64_workload_queue.h"
+#include <cstdio>
+#include <cstdlib>
 
 #include "common/rt64_thread.h"
 
@@ -18,21 +20,40 @@ namespace RT64 {
     }
 
     WorkloadQueue::~WorkloadQueue() {
-        threadsRunning = false;
+        requestStop();
+        joinThreads();
+    }
+
+    void WorkloadQueue::requestStop() {
+        // Update the predicates while holding their wait mutexes so a worker
+        // cannot miss the shutdown notification between checking and sleeping.
+        {
+            const std::scoped_lock lock(cursorMutex, idleMutex, workloadIdMutex);
+            threadsRunning = false;
+        }
         cursorCondition.notify_all();
         idleCondition.notify_all();
+        workloadIdCondition.notify_all();
+        if (ext.sharedResources != nullptr) {
+            // Synchronize with an interpolation waiter that may have checked
+            // threadsRunning just before it changed.
+            const std::scoped_lock lock(ext.sharedResources->interpolatedMutex);
+            ext.sharedResources->interpolatedCondition.notify_all();
+        }
+    }
 
+    void WorkloadQueue::joinThreads() {
         if (renderThread != nullptr) {
             renderThread->join();
             delete renderThread;
+            renderThread = nullptr;
         }
 
         if (idleThread != nullptr) {
             idleThread->join();
             delete idleThread;
+            idleThread = nullptr;
         }
-
-        workloadIdCondition.notify_all();
     }
 
     void WorkloadQueue::reset() {
@@ -206,6 +227,18 @@ namespace RT64 {
 
         uint32_t msaaSampleCount = ext.sharedResources->userConfig.msaaSampleCount();
 
+        // Reproducible offscreen benchmark targets; independent of desktop
+        // window size and never written into the user's graphics settings.
+        static const uint32_t waterTestHeight=[]() {
+            const char *v=std::getenv("WR64_TEST_HEIGHT");
+            const int h=v ? std::atoi(v) : 0;
+            return h==1080 || h==1440 || h==2160 ? uint32_t(h) : 0u;
+        }();
+        if (waterTestHeight) {
+            resolutionMultiplier=float(waterTestHeight)/float(referenceHeight);
+            workloadConfig.aspectRatioTarget=16.0f/9.0f;
+        }
+
         // Build the resolution scale vector from the configuration.
         workloadConfig.aspectRatioScale = workloadConfig.aspectRatioTarget / workloadConfig.aspectRatioSource;
         workloadConfig.resolutionScale = { resolutionMultiplier * workloadConfig.aspectRatioScale, resolutionMultiplier };
@@ -259,8 +292,9 @@ namespace RT64 {
                 std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
                 InterpolatedFrameCounters &curFrameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
                 ext.sharedResources->interpolatedCondition.wait(interpolatedLock, [&]() {
-                    return curFrameCounters.presented >= curFrameCounters.available;
+                    return !threadsRunning || curFrameCounters.presented >= curFrameCounters.available;
                 });
+                if (!threadsRunning) return;
             }
 
             std::scoped_lock<std::mutex> managerLock(ext.sharedResources->managerMutex);
@@ -371,6 +405,7 @@ namespace RT64 {
 
         for (uint32_t w = 0; w < curFrame.workloads.size(); w++) {
             Workload &workload = workloads[curFrame.workloads[w]];
+            ElapsedTimer waterCpuPrepare;
 
             // There's no guarantee the RSP was processed if framebuffers were not rendered.
             const bool processRSP = true;
@@ -411,6 +446,7 @@ namespace RT64 {
             uint32_t targetMisalignX;
             uint32_t rtWidth;
             uint32_t rtHeight;
+            uint32_t profileTargetWidth=0, profileTargetHeight=0;
             RenderTarget *colorTarget;
             RenderTarget *depthTarget;
             RenderFramebufferKey fbKey;
@@ -625,6 +661,10 @@ namespace RT64 {
                     drawParams.fbHeight = nativeColorHeight;
                     drawParams.targetWidth = targetWidth;
                     drawParams.targetHeight = targetHeight;
+                    if (colorTarget && uint64_t(targetWidth)*targetHeight>uint64_t(profileTargetWidth)*profileTargetHeight) {
+                        profileTargetWidth=targetWidth;
+                        profileTargetHeight=targetHeight;
+                    }
                     drawParams.rasterShaderCache = ext.rasterShaderCache;
                     drawParams.resolutionScale = fixedResScale;
                     drawParams.aspectRatioSource = workloadConfig.aspectRatioSource;
@@ -635,6 +675,7 @@ namespace RT64 {
                     drawParams.rtEnabled = workloadConfig.raytracingEnabled;
                     drawParams.submissionFrame = workload.submissionFrame;
                     drawParams.deltaTimeMs = deltaTimeMs;
+                    drawParams.interpolationWeight = curFrameWeight;
                     drawParams.ubershadersOnly = ubershadersOnly;
                     drawParams.postBlendNoise = workloadConfig.postBlendNoise;
                     drawParams.postBlendNoiseNegative = workloadConfig.postBlendNoiseNegative;
@@ -840,6 +881,7 @@ namespace RT64 {
             ext.workloadGraphicsWorker->commandList->writeTimestamp(queryPool.get(), 1);
             ext.workloadGraphicsWorker->commandList->end();
             framebufferRenderer->waitForUploaders();
+            const double waterCpuPrepareMs=waterCpuPrepare.elapsedMilliseconds();
             ext.workloadGraphicsWorker->execute();
             ext.workloadGraphicsWorker->wait();
             workerMutex.unlock();
@@ -848,6 +890,29 @@ namespace RT64 {
             queryPool->queryResults();
             const uint64_t *frameTimestamps = queryPool->getResults();
             rendererGPUProfiler.log(double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0);
+            static FILE *waterFrameProfile=[]() {
+                const char *name=std::getenv("WR64_FRAME_PROFILE");
+                FILE *f=name ? std::fopen(name,"w") : nullptr;
+                if (f) std::fprintf(f,"submission,quality,course,width,height,msaa,water_views,cpu_prepare_ms,gpu_ms,water_allocation_bytes\n");
+                return f;
+            }();
+            if (waterFrameProfile) {
+                const auto *water=framebufferRenderer->waterRenderer.get();
+                const bool active=water && !water->draws.empty();
+                // Use the same actual color-target extent for every quality.
+                // A VI-size estimate for Original incorrectly included rows
+                // outside the game's active render target.
+                const uint32_t width=profileTargetWidth;
+                const uint32_t height=profileTargetHeight;
+                std::fprintf(waterFrameProfile,"%llu,%.0f,%.0f,%u,%u,%u,%zu,%.5f,%.5f,%llu\n",(unsigned long long)workload.submissionFrame,
+                    active ? water->draws.front().material.identity.x : 0,active ? water->draws.front().material.identity.z : -1,
+                    width,height,targetManager.multisampling.sampleCount,active ? water->sceneKeys.size() : 0,waterCpuPrepareMs,
+                    double(frameTimestamps[1]-frameTimestamps[0])/1000000.0,(unsigned long long)(water ? water->allocationBytes() : 0));
+                std::fflush(waterFrameProfile);
+            }
+            if (framebufferRenderer->waterRenderer) {
+                framebufferRenderer->waterRenderer->finishProfile(double(frameTimestamps[1]-frameTimestamps[0])/1000000.0);
+            }
 
             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
             ext.textureCache->decrementLock();
@@ -901,6 +966,8 @@ namespace RT64 {
                 }
             }
 
+            if (!threadsRunning) break;
+
             if (processCursor >= 0) {
                 std::unique_lock<std::mutex> threadLock(threadMutex);
                 Workload &workload = workloads[processCursor];
@@ -913,6 +980,7 @@ namespace RT64 {
                 ElapsedTimer workloadTimer;
                 workloadProfiler.start();
                 threadConfigurationUpdate(workload.viFbSize, workloadConfig);
+                if (!threadsRunning) break;
 
                 // FIXME: This is a very hacky way to find out if we need to advance the frame if the workload was paused for the first time.
                 if (!workload.paused || (!gameFrames[curFrameIndex].workloads.empty() && (gameFrames[curFrameIndex].workloads[0] != (uint32_t)processCursor))) {
@@ -1032,8 +1100,9 @@ namespace RT64 {
                 else if (generateInterpolatedFrames) {
                     std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
                     ext.sharedResources->interpolatedCondition.wait(interpolatedLock, [&]() {
-                        return (prevFrameCounters.presented == 0) || (prevFrameCounters.presented >= prevFrameCounters.available);
+                        return !threadsRunning || (prevFrameCounters.presented == 0) || (prevFrameCounters.presented >= prevFrameCounters.available);
                     });
+                    if (!threadsRunning) return;
                 }
 
                 InterpolatedFrameCounters &curFrameCounters = ext.sharedResources->interpolatedFrames[ext.sharedResources->interpolatedFramesIndex];
@@ -1064,7 +1133,7 @@ namespace RT64 {
                 uint32_t targetIndex = 0;
                 uint32_t framesRendered = 0;
                 int64_t renderTimeTotalMicro = 0;
-                for (uint32_t frame = 0; (frame < displayFrames) && !skipWorkloadNow; frame++) {
+                for (uint32_t frame = 0; (frame < displayFrames) && !skipWorkloadNow && threadsRunning; frame++) {
                     // Evaluate if this frame should be skipped. Measure the current time and compare it to what frame is estimated should be have been rendered by now.
                     if ((frame > 0) && (originalTimeMicro > 0)) {
                         const int64_t currentTimeMicro = workloadTimer.elapsedMicroseconds() - setupTimeMicro;
@@ -1094,8 +1163,9 @@ namespace RT64 {
                                 std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
                                 ext.sharedResources->interpolatedCondition.wait(interpolatedLock, [&]() {
                                     frameReduction = frameReduction || (prevFrameCounters.presented <= targetIndex);
-                                    return prevFrameCounters.presented > targetIndex;
+                                    return !threadsRunning || prevFrameCounters.presented > targetIndex;
                                 });
+                                if (!threadsRunning) return;
                             }
 
                             targetIndex++;

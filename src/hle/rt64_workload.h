@@ -174,6 +174,7 @@ namespace RT64 {
 
     struct OutputBuffers {
         ComputedBuffer screenPosBuffer;
+        ComputedBuffer rasterWorldPosBuffer;
         ComputedBuffer genTexCoordBuffer;
         ComputedBuffer shadedColBuffer;
         ComputedBuffer worldPosBuffer;

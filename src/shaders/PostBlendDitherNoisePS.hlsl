@@ -38,3 +38,5 @@ void PSMain(
     resultColor = max(-resultColor, 0.0f);
 #endif
 }
+#include "shared/rt64_raster_params.h"
+// Keep generated SPIR-V in sync with RasterParams layout changes.

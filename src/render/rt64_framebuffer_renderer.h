@@ -23,6 +23,7 @@
 #include "rt64_render_target.h"
 #include "rt64_rsp_processor.h"
 #include "rt64_vertex_processor.h"
+#include "rt64_water_renderer.h"
 
 #if RT_ENABLED
 #   include "rt64_raytracing_resources.h"
@@ -102,6 +103,8 @@ namespace RT64 {
         std::unique_ptr<RSPVertexTestZDescriptorSet> vertexTestZSet;
         interop::FrameParams frameParams;
         const ShaderLibrary *shaderLibrary = nullptr;
+        std::unique_ptr<WaterRenderer> waterRenderer;
+        bool waterUnavailable = false;
 
 #   if RT_ENABLED
         const RenderTexture *blueNoiseTexture = nullptr;
@@ -143,6 +146,7 @@ namespace RT64 {
             bool rtEnabled;
             uint64_t submissionFrame;
             float deltaTimeMs;
+            float interpolationWeight = 1.0f;
             bool ubershadersOnly;
             bool postBlendNoise;
             bool postBlendNoiseNegative;

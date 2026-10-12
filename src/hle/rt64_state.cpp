@@ -89,6 +89,7 @@ namespace RT64 {
         lastWorkloadIndex = 0;
         addLightsOnFlush = false;
         activeSpriteCommand.replacementHash = 0;
+        waterMaterial = {};
 
         rsp->reset();
         rdp->reset();
@@ -134,6 +135,7 @@ namespace RT64 {
         drawCall.NoN = false;
         drawCall.extendedType = DrawExtendedType::None;
         drawCall.extendedFlags = {};
+        drawCall.waterMaterial = {};
         drawCall.drawStatusChanges = 0;
 
         // Mark everything as changed so everything on the draw call gets updated.
@@ -206,8 +208,8 @@ namespace RT64 {
         }
 
         if (drawStatus.isChanged(DrawAttribute::Key)) {
-            drawCall.rdpParams.keyCenter = rdp->keyCenter;
-            drawCall.rdpParams.keyScale = rdp->keyScale;
+            drawCall.rdpParams.keyCenter = { rdp->keyCenter.x, rdp->keyCenter.y, rdp->keyCenter.z, 0.0f };
+            drawCall.rdpParams.keyScale = { rdp->keyScale.x, rdp->keyScale.y, rdp->keyScale.z, 0.0f };
         }
 
         if (drawStatus.isChanged(DrawAttribute::Scissor)) {
@@ -455,6 +457,9 @@ namespace RT64 {
             drawCall.extendedFlags = rdp->extended.drawExtendedFlags;
         }
 
+        if (drawStatus.isChanged(DrawAttribute::WaterMaterial)) {
+            drawCall.waterMaterial = waterMaterial;
+        }
         drawStatus.clearChanges();
     }
 

@@ -16,6 +16,11 @@
 #include "rt64_descriptor_sets.h"
 #include "rt64_render_worker.h"
 
+#include <chrono>
+#include <cstdio>
+#include <thread>
+#include <cstdlib>
+
 // TODO: Move to shared.
 
 namespace interop {
@@ -169,6 +174,7 @@ namespace RT64 {
     
     void FramebufferRenderer::resetFramebuffers(RenderWorker *worker, bool ubershadersVisible, float ditherNoiseStrength, const RenderMultisampling &multisampling) {
         instanceDrawCallVector.clear();
+        if (waterRenderer) waterRenderer->reset();
         hitGroupVector.clear();
         renderIndicesVector.clear();
         rspSmoothNormalVector.clear();
@@ -466,6 +472,7 @@ namespace RT64 {
     }
     
     void FramebufferRenderer::submitRasterScene(RenderWorker *worker, const Framebuffer &framebuffer, RenderFramebufferStorage *fbStorage, const RasterScene &rasterScene, bool &depthState) {
+        uint32_t waterProfileToken = UINT32_MAX, waterProfileScene = UINT32_MAX, activeWaterDraw = UINT32_MAX;
         InstanceDrawCall::Type previousCallType = InstanceDrawCall::Type::Unknown;
         bool previousVertexTestZ = false;
         const RenderPipeline *previousPipeline = nullptr;
@@ -508,12 +515,32 @@ namespace RT64 {
             }
         };
 
+        auto finishWater = [&]() {
+            if (activeWaterDraw==UINT32_MAX) return;
+            const auto &scene=waterRenderer->scenes[waterRenderer->drawScenes[activeWaterDraw]];
+            worker->commandList->setFramebuffer(nullptr);
+            worker->commandList->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(scene.surface.get(),RenderTextureLayout::SHADER_READ));
+            worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
+            worker->commandList->setViewports(framebuffer.viewport);
+            const auto &bounds=waterRenderer->draws[activeWaterDraw].viewBounds;
+            worker->commandList->setScissors(RenderRect(int32_t(bounds.x),int32_t(bounds.y),int32_t(bounds.z),int32_t(bounds.w)));
+            waterRenderer->drawSpray(worker,activeWaterDraw);
+            activeWaterDraw=UINT32_MAX;
+            switchToGraphicsPipeline();
+        };
+
         if (fbStorage->colorTarget != nullptr) {
             switchToGraphicsPipeline();
         }
         
         for (uint32_t i : rasterScene.instanceIndices) {
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
+            const uint32_t waterScene = drawCall.waterIndex == UINT32_MAX ? UINT32_MAX : waterRenderer->drawScenes[drawCall.waterIndex];
+            if (activeWaterDraw!=UINT32_MAX && waterScene!=waterRenderer->drawScenes[activeWaterDraw]) finishWater();
+            if (waterProfileToken != UINT32_MAX && waterScene != waterProfileScene) {
+                waterRenderer->endProfile(worker,waterProfileToken);
+                waterProfileToken = UINT32_MAX;
+            }
             switch (drawCall.type) {
             case InstanceDrawCall::Type::IndexedTriangles: 
             case InstanceDrawCall::Type::RawTriangles:
@@ -564,6 +591,72 @@ namespace RT64 {
                 if (previousScissor != triangles.scissor) {
                     worker->commandList->setScissors(triangles.scissor);
                     previousScissor = triangles.scissor;
+                }
+
+                if (drawCall.waterIndex != UINT32_MAX) {
+                    if (waterRenderer->captureScene(worker,drawCall.waterIndex,depthState)) {
+                        worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
+                        worker->commandList->setViewports(framebuffer.viewport);
+                        worker->commandList->setScissors(triangles.scissor);
+                        worker->commandList->setIndexBuffer(triangles.vertexTestZ ? &testZIndexBufferView : &indexBufferView);
+                    }
+                    if (waterProfileToken == UINT32_MAX) {
+                        waterProfileToken = waterRenderer->beginProfile(worker,2);
+                        waterProfileScene = waterScene;
+                    }
+                    if (drawCall.originalWaterPipeline) {
+                        // Use the original texture combiner, opacity and fog as the
+                        // Classic base, at the same position in the game's draw order.
+                        switchToGraphicsPipeline();
+                        worker->commandList->setVertexBuffers(0,indexedVertexViews.data(),uint32_t(indexedVertexViews.size()),vertexInputSlots.data());
+                        worker->commandList->setScissors(triangles.scissor);
+                        worker->commandList->setPipeline(drawCall.originalWaterPipeline);
+                        rasterParams.renderIndex=i;
+                        rasterParams.screenScale=triangles.screenScale;
+                        rasterParams.screenOffset=triangles.screenOffset;
+                        worker->commandList->setGraphicsPushConstants(0,&rasterParams);
+                        drawCallTriangles(drawCall);
+                        waterRenderer->captureOriginal(worker,drawCall.waterIndex);
+                        worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
+                        worker->commandList->setViewports(framebuffer.viewport);
+                        worker->commandList->setScissors(triangles.scissor);
+                        worker->commandList->setIndexBuffer(triangles.vertexTestZ ? &testZIndexBufferView : &indexBufferView);
+                    }
+                    worker->commandList->setGraphicsPipelineLayout(waterRenderer->layout.get());
+                    worker->commandList->setGraphicsDescriptorSet(waterRenderer->materialSet(drawCall.waterIndex), 0);
+                    const RenderVertexBufferView views[] = {indexedVertexViews[0], indexedVertexViews[1], indexedVertexViews[2], waterRenderer->worldView, waterRenderer->normalView};
+                    const RenderInputSlot slots[] = {{0,16}, {1,8}, {2,16}, {3,16}, {4,16}};
+                    worker->commandList->setVertexBuffers(0, views, 5, slots);
+                    interop::WaterPushConstants pc{drawCall.waterIndex};
+                    worker->commandList->setGraphicsPushConstants(0, &pc);
+                    waterRenderer->beginSurface(worker,drawCall.waterIndex);
+                    worker->commandList->setViewports(framebuffer.viewport);
+                    worker->commandList->setScissors(triangles.scissor);
+                    const bool classic=drawCall.originalWaterPipeline!=nullptr;
+                    const bool selfDepth=waterRenderer->scenes[waterRenderer->drawScenes[drawCall.waterIndex]].selfDepth;
+                    worker->commandList->setPipeline(waterRenderer->pipeline(worker->device,fbStorage->colorTarget->multisampling,
+                        otherMode.zCmp() || selfDepth,selfDepth,false,true,classic,selfDepth));
+                    drawCallTriangles(drawCall);
+                    if (selfDepth) waterRenderer->beginColor(worker,drawCall.waterIndex);
+                    else {
+                        worker->commandList->setFramebuffer(nullptr);
+                        worker->commandList->barriers(RenderBarrierStage::GRAPHICS,RenderTextureBarrier(fbStorage->depthTarget->texture.get(),depthState ? RenderTextureLayout::DEPTH_READ : RenderTextureLayout::DEPTH_WRITE));
+                        worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
+                    }
+                    worker->commandList->setViewports(framebuffer.viewport);
+                    worker->commandList->setScissors(triangles.scissor);
+                    worker->commandList->setPipeline(triangles.pipeline);
+                    activeWaterDraw=drawCall.waterIndex;
+                    if (waterRenderer->draws[drawCall.waterIndex].material.identity.y==12) {
+                        worker->commandList->setIndexBuffer(&waterRenderer->wireView);
+                        worker->commandList->drawIndexedInstanced(triangles.faceCount*6,1,waterRenderer->wireStarts[drawCall.waterIndex],0,0);
+                    } else drawCallTriangles(drawCall);
+                    if (selfDepth) {
+                        worker->commandList->setFramebuffer(nullptr);
+                        worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
+                    }
+                    switchToGraphicsPipeline();
+                    break;
                 }
 
                 if (previousPipeline != triangles.pipeline) {
@@ -637,6 +730,9 @@ namespace RT64 {
                 break;
             }
         }
+
+        finishWater();
+        if (waterProfileToken != UINT32_MAX) waterRenderer->endProfile(worker,waterProfileToken);
 
         // Mark targets for resolve.
         if (fbStorage->colorTarget != nullptr) {
@@ -1198,9 +1294,14 @@ namespace RT64 {
             uploader->commandListAfterBarriers(worker);
         }
 
+        shaderUploader->commandListAfterBarriers(worker);
+
         if (rspProcessor != nullptr) {
             rspProcessor->recordCommandList(worker, shaderLibrary, outputBuffers);
         }
+
+        if (waterRenderer && !waterRenderer->draws.empty()) waterRenderer->recordNormals(worker, *outputBuffers);
+        if (waterRenderer && !waterRenderer->draws.empty()) waterRenderer->recordField(worker);
 
         if (vertexProcessor != nullptr) {
             vertexProcessor->recordCommandList(worker, shaderLibrary, outputBuffers);
@@ -1220,7 +1321,6 @@ namespace RT64 {
         }
 #   endif
 
-        shaderUploader->commandListAfterBarriers(worker);
         pendingUploaders = bufferUploaders;
 
         if (!dynamicTextureBarrierVector.empty()) {
@@ -1433,7 +1533,15 @@ namespace RT64 {
 
         const float SimilarityPercentage = 0.1f; // TODO: Make more strict once VI ratios are in.
         const float scissorRatio = static_cast<float>(fbPair.scissorRect.width(false, true)) / static_cast<float>(fbPair.scissorRect.height(false, true));
-        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage);
+        // wr64: a scissor that covers most of the framebuffer is the game's main
+        // frame whatever its shape. Wave Race 64 draws inside a 303x199 region
+        // of its 320x240 framebuffer, 14% off 4:3, which the similarity test
+        // rejects; its 2D content was then stretched across the widened frame
+        // instead of kept at its original shape in the middle.
+        const bool scissorIsMostOfFramebuffer =
+            (fbPair.scissorRect.width(false, true) >= int32_t(p.fbWidth) * 3 / 4) &&
+            (fbPair.scissorRect.height(false, true) >= int32_t(p.fbHeight) * 3 / 4);
+        const bool adjustRatio = (abs((scissorRatio / p.aspectRatioSource) - 1.0f) < SimilarityPercentage) || scissorIsMostOfFramebuffer;
         const float aspectRatioScale = adjustRatio ? (p.aspectRatioTarget / p.aspectRatioSource) : 1.0f;
         InstanceDrawCall instanceDrawCall;
         interop::RenderIndices renderIndices;
@@ -1488,7 +1596,23 @@ namespace RT64 {
                 // The call's scissor spans the whole width of the framebuffer pair scissor. Custom origin must not be in use to be able to use the stretched viewport.
                 const auto &viewport = drawData.rspViewports[proj.transformsIndex];
                 FixedRect intersectionRect = proj.scissorRect.intersection(viewport.rect(viewportClipRatios));
-                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx) && (intersectionRect.lrx >= fbPair.scissorRect.lrx);
+                // wr64: a 3D pass that reaches nearly both edges of the frame is
+                // covering it. The exact test fails on this game's eight-pixel
+                // border. It scissors its world to the region it draws into,
+                // (8, 20)-(311, 219), and in most frames nothing else touches
+                // the framebuffer, so the frame's scissor is that same region
+                // and the test passes. In the championship's warm-up round
+                // something else in the frame does touch the whole 320x240
+                // framebuffer; the frame's scissor becomes the whole thing, the
+                // world falls eight pixels short at each end, and the warm-up
+                // was rendered at 4:3 while every other race was widened.
+                //
+                // A sixteenth of the frame's width is about twenty pixels here:
+                // comfortably more than the border, and far less than the inset
+                // boxes the select screens draw their models into, which reach
+                // barely half the width and must keep failing this test.
+                const int32_t coverTolerance = (fbPair.scissorRect.lrx - fbPair.scissorRect.ulx) / 16;
+                bool coversWholeWidth = !intersectionRect.isEmpty() && (intersectionRect.ulx <= fbPair.scissorRect.ulx + coverTolerance) && (intersectionRect.lrx >= fbPair.scissorRect.lrx - coverTolerance);
                 bool horizontalRatio = !intersectionRect.isEmpty() && (intersectionRect.width(true, true) > intersectionRect.height(true, true));
                 bool useWideViewport = (viewportOrigin == G_EX_ORIGIN_NONE) && coversWholeWidth && horizontalRatio;
                 if (useWideViewport) {
@@ -1508,6 +1632,8 @@ namespace RT64 {
 
             for (uint32_t d = 0; (d < proj.gameCallCount) && (globalCallIndex < p.maxGameCall); d++) {
                 const GameCall &call = proj.gameCalls[d];
+                instanceDrawCall.waterIndex = UINT32_MAX;
+                instanceDrawCall.originalWaterPipeline = nullptr;
                 renderIndices.instanceIndex = call.callDesc.callIndex;
                 renderIndices.faceIndicesStart = call.meshDesc.faceIndicesStart;
                 renderIndices.rdpTileIndex = call.callDesc.tileIndex;
@@ -1608,6 +1734,17 @@ namespace RT64 {
                         triangles.shaderDesc = call.shaderDesc;
 
                         RasterShader *gpuShader = p.ubershadersOnly ? nullptr : p.rasterShaderCache->getGPUShader(call.shaderDesc);
+#if defined(WR64_ANDROID_NO_UBERSHADERS)
+                        if (gpuShader == nullptr && !p.ubershadersOnly) {
+                            // Specialized shaders compile asynchronously. Do not
+                            // substitute the ubershader on Android while testing
+                            // the Mali compiler path.
+                            do {
+                                std::this_thread::yield();
+                                gpuShader = p.rasterShaderCache->getGPUShader(call.shaderDesc);
+                            } while (gpuShader == nullptr);
+                        }
+#endif
                         if (gpuShader != nullptr) {
                             triangles.pipeline = gpuShader->pipeline.get();
                         }
@@ -1687,6 +1824,136 @@ namespace RT64 {
                             instanceDrawCallVector[vertexTestZCallIndex].vertexTestZ.indexCount += call.callDesc.triangleCount * 3;
                             vertexTestZFaceIndicesStart += call.callDesc.triangleCount * 3;
                         }
+                    }
+                }
+
+                const bool wantsWater = call.callDesc.waterMaterial.identity.x > 0.0f &&
+                    instanceDrawCall.type == InstanceDrawCall::Type::IndexedTriangles && p.fbStorage->colorTarget && p.fbStorage->depthTarget;
+                if (wantsWater && !waterRenderer && !waterUnavailable) {
+                    try {
+                        waterRenderer = std::make_unique<WaterRenderer>(p.worker->device, p.rasterShaderCache->shaderFormat, shaderLibrary->usesHDR);
+                    }
+                    catch (const std::exception &error) {
+                        waterUnavailable = true;
+                        std::fprintf(stderr,"[water] retaining Original rendering: %s\n",error.what());
+                    }
+                }
+                const bool waterSamplesSupported = wantsWater &&
+                    (p.worker->device->getSampleCountsSupported(RenderFormat::R32_FLOAT) & p.fbStorage->colorTarget->multisampling.sampleCount);
+                if (wantsWater && waterRenderer && waterSamplesSupported) {
+                    interop::WaterDrawParams wp{};
+                    wp.material = call.callDesc.waterMaterial;
+                    wp.material.surface.w=float(proj.transformsIndex);
+                    wp.screen = {float(p.fbWidth), float(p.fbHeight), float(p.targetWidth), float(p.targetHeight)};
+                    wp.screenTransform = {triangles.screenScale.x, triangles.screenScale.y, triangles.screenOffset.x, triangles.screenOffset.y};
+                    const auto inverseView = hlslpp::inverse(drawData.modViewTransforms[proj.transformsIndex]);
+                    const auto camera = viewPositionFrom(inverseView);
+                    const float t = wp.material.animation.x + (wp.material.animation.y - wp.material.animation.x) * p.interpolationWeight;
+                    wp.camera = {camera.x, camera.y, camera.z, t};
+                    wp.viewProjection = drawData.modViewProjTransforms[proj.transformsIndex];
+                    wp.inverseViewProjection = hlslpp::inverse(wp.viewProjection);
+                    const auto fc = call.callDesc.rdpParams.fogColor;
+                    const bool fog = (call.callDesc.geometryMode & G_FOG) != 0;
+                    wp.fogColor = {std::pow(fc.x,2.2f), std::pow(fc.y,2.2f), std::pow(fc.z,2.2f), fog ? 1.0f : 0.0f};
+                    wp.flags = {call.callDesc.otherMode.zSource() == G_ZS_PRIM ? 1.0f : 0.0f, call.callDesc.rdpParams.primDepth.x, 0.0f, 0.0f};
+                    const auto &waterViewport = drawData.rspViewports[proj.transformsIndex];
+                    wp.viewportScale = {waterViewport.scale.x,waterViewport.scale.y,waterViewport.scale.z,framebuffer.viewport.width};
+                    wp.viewportTranslate = {waterViewport.translate.x,waterViewport.translate.y,waterViewport.translate.z,framebuffer.viewport.height};
+                    wp.viewBounds = {float(triangles.scissor.left),float(triangles.scissor.top),float(triangles.scissor.right),float(triangles.scissor.bottom)};
+                    static const bool waterDiagnostics=std::getenv("WR64_WATER_DIAGNOSTICS")!=nullptr;
+                    static uint64_t waterDiagnosticFrame=0;
+                    if (waterDiagnostics && (++waterDiagnosticFrame%120)==1) {
+                        const uint32_t vertex=drawData.faceIndices[call.meshDesc.faceIndicesStart];
+                        const auto &matrix=drawData.worldTransforms[drawData.worldIndices[vertex]];
+                        const auto &craft=wp.material.craftCurrent[0];
+                        std::fprintf(stderr,"[water-space] course=%.0f camera=(%.1f,%.1f,%.1f) craft=(%.1f,%.1f,%.1f; wet %.2f) vertex=(%.1f,%.1f,%.1f) world_t=(%.1f,%.1f,%.1f) clock=(%.3f,%.3f,%.3f)\n",
+                            wp.material.identity.z,wp.camera.x,wp.camera.y,wp.camera.z,craft.x,craft.y,craft.z,craft.w,
+                            drawData.posFloats[vertex*3],drawData.posFloats[vertex*3+1],drawData.posFloats[vertex*3+2],
+                            matrix[3][0],matrix[3][1],matrix[3][2],wp.material.animation.x,wp.material.animation.y,wp.camera.w);
+                    }
+                    // Optional CPU-only evidence for presentation interpolation. This
+                    // deliberately does no GPU readback and performs no I/O by default.
+                    static FILE *waterMotionTrace=[]() -> FILE * {
+                        const char *path=std::getenv("WR64_WATER_MOTION_TRACE");
+                        if (!path || !*path) return nullptr;
+                        FILE *file=std::fopen(path,"w");
+                        if (file) {
+                            std::setvbuf(file,nullptr,_IOLBF,0);
+                            std::fprintf(file,"submission,cpu_time_us,course,view,quality,style,generation,draw_index,prev_time,current_time,camera_time,interpolation_weight,triangle_index_count,unique_vertex_count,position_moving_vertices,position_velocity_rms,position_velocity_max,xz_velocity_rms,xz_velocity_max,uv_moving_vertices,uv_velocity_rms,uv_velocity_max,sample_vertex,sample_transform,sample_group,sample_transform_vertex_count,sample_pos_x,sample_pos_y,sample_pos_z,sample_vel_x,sample_vel_y,sample_vel_z,sample_uv_s,sample_uv_t,sample_uv_vel_s,sample_uv_vel_t\n");
+                        }
+                        return file;
+                    }();
+                    if (waterMotionTrace) {
+                        const auto timestamp=std::chrono::duration_cast<std::chrono::microseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch()).count();
+                        const uint32_t indexCount=call.callDesc.triangleCount*3;
+                        const uint32_t indexStart=call.meshDesc.faceIndicesStart;
+                        std::vector<uint32_t> vertices(drawData.faceIndices.begin()+indexStart,
+                            drawData.faceIndices.begin()+indexStart+indexCount);
+                        std::sort(vertices.begin(),vertices.end());
+                        vertices.erase(std::unique(vertices.begin(),vertices.end()),vertices.end());
+                        uint32_t movingPositions=0,movingUVs=0,sampleVertex=UINT32_MAX;
+                        double positionSum=0,positionMax=0,xzSum=0,xzMax=0,uvSum=0,uvMax=0;
+                        for (uint32_t vertex:vertices) {
+                            const double vx=drawData.velFloats[vertex*3],vy=drawData.velFloats[vertex*3+1],vz=drawData.velFloats[vertex*3+2];
+                            const double vs=drawData.tcVelFloats[vertex*2],vt=drawData.tcVelFloats[vertex*2+1];
+                            const double xzSquared=vx*vx+vz*vz,positionSquared=xzSquared+vy*vy,uvSquared=vs*vs+vt*vt;
+                            const bool movesPosition=positionSquared>1e-12,movesUV=uvSquared>1e-12;
+                            movingPositions+=movesPosition; movingUVs+=movesUV;
+                            positionSum+=positionSquared; positionMax=std::max(positionMax,positionSquared);
+                            xzSum+=xzSquared; xzMax=std::max(xzMax,xzSquared);
+                            uvSum+=uvSquared; uvMax=std::max(uvMax,uvSquared);
+                            if (sampleVertex==UINT32_MAX && (movesPosition || movesUV)) sampleVertex=vertex;
+                        }
+                        if (sampleVertex==UINT32_MAX && !vertices.empty()) sampleVertex=vertices.front();
+                        uint32_t transform=UINT32_MAX,group=UINT32_MAX,transformVertexCount=0;
+                        double sample[10]{};
+                        if (sampleVertex!=UINT32_MAX) {
+                            transform=drawData.worldIndices[sampleVertex];
+                            group=drawData.transformGroups[drawData.worldTransformGroups[transform]].matrixId;
+                            transformVertexCount=drawData.worldTransformVertexCount(transform);
+                            for (uint32_t axis=0;axis<3;axis++) {
+                                sample[axis]=drawData.posFloats[sampleVertex*3+axis];
+                                sample[axis+3]=drawData.velFloats[sampleVertex*3+axis];
+                            }
+                            for (uint32_t axis=0;axis<2;axis++) {
+                                sample[axis+6]=drawData.tcFloats[sampleVertex*2+axis];
+                                sample[axis+8]=drawData.tcVelFloats[sampleVertex*2+axis];
+                            }
+                        }
+                        const double divisor=double(std::max<size_t>(vertices.size(),1));
+                        std::fprintf(waterMotionTrace,"%llu,%lld,%.0f,%u,%.0f,%.0f,%.0f,%zu,%.9f,%.9f,%.9f,%.9f,%u,%zu,%u,%.9f,%.9f,%.9f,%.9f,%u,%.9f,%.9f,%u,%u,%u,%u,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f,%.9f\n",
+                            static_cast<unsigned long long>(p.submissionFrame),static_cast<long long>(timestamp),wp.material.identity.z,proj.transformsIndex,
+                            wp.material.identity.x,wp.material.optics.w,wp.material.identity.w,waterRenderer->draws.size(),
+                            wp.material.animation.x,wp.material.animation.y,wp.camera.w,p.interpolationWeight,indexCount,vertices.size(),
+                            movingPositions,std::sqrt(positionSum/divisor),std::sqrt(positionMax),std::sqrt(xzSum/divisor),std::sqrt(xzMax),
+                            movingUVs,std::sqrt(uvSum/divisor),std::sqrt(uvMax),sampleVertex,transform,group,transformVertexCount,
+                            sample[0],sample[1],sample[2],sample[3],sample[4],sample[5],sample[6],sample[7],sample[8],sample[9]);
+                    }
+                    bool waterMatricesValid=std::isfinite(wp.camera.x) && std::isfinite(wp.camera.y) && std::isfinite(wp.camera.z)
+                        && std::abs(wp.viewportScale.z)>0.000001f && std::abs(wp.screenTransform.x)>0.000001f && std::abs(wp.screenTransform.y)>0.000001f;
+                    for (uint32_t row=0;row<4;row++) for (uint32_t col=0;col<4;col++) waterMatricesValid &= std::isfinite(wp.inverseViewProjection[row][col]);
+                    RenderPipeline *waterPipeline = nullptr;
+                    const bool classic=wp.material.optics.w>0.5f;
+                    // Originally opaque two-player water already owns scene
+                    // depth writes. Isolate only the translucent legacy path
+                    // whose Modern replacement now shades opaquely.
+                    const bool selfDepth=!classic && !call.callDesc.otherMode.zUpd();
+                    if (waterMatricesValid) {
+                        waterPipeline = waterRenderer->pipeline(p.worker->device,p.fbStorage->colorTarget->multisampling,
+                            call.callDesc.otherMode.zCmp() || selfDepth,call.callDesc.otherMode.zUpd() && !selfDepth,wp.material.identity.y==12,false,classic,selfDepth);
+                        waterMatricesValid = waterPipeline && waterRenderer->pipeline(p.worker->device,p.fbStorage->colorTarget->multisampling,
+                            call.callDesc.otherMode.zCmp() || selfDepth,selfDepth,false,true,classic,selfDepth);
+                    }
+                    if (waterMatricesValid) {
+                        instanceDrawCall.waterIndex = uint32_t(waterRenderer->draws.size());
+                        waterRenderer->draws.push_back(wp);
+                        waterRenderer->drawScenes.push_back(waterRenderer->prepareScene(p.worker,p.fbStorage->colorTarget,p.fbStorage->depthTarget,
+                            (uint64_t(framebufferCount) << 32) | proj.transformsIndex,classic,selfDepth));
+                        waterRenderer->collectNormals(drawData, call.meshDesc.faceIndicesStart, call.callDesc.triangleCount * 3, (uint64_t(framebufferCount) << 32) | proj.transformsIndex);
+                        if (wp.material.optics.w>0.5f) instanceDrawCall.originalWaterPipeline=triangles.pipeline;
+                        triangles.pipeline = waterPipeline;
+                        waterRenderer->worldView = RenderVertexBufferView(RenderBufferReference(outputBuffers.rasterWorldPosBuffer.buffer.get()), PosStride * vertexCount);
                     }
                 }
 
@@ -1816,7 +2083,13 @@ namespace RT64 {
         }
 #   endif
 
+        if (waterRenderer && !waterRenderer->draws.empty()) {
+            waterRenderer->prepareField(worker);
+            waterRenderer->prepareNormals(worker, *outputBuffers, shaderUploads);
+            shaderUploads.push_back({waterRenderer->draws.data(), {0,waterRenderer->draws.size()}, sizeof(interop::WaterDrawParams), RenderBufferFlag::STORAGE, {}, &waterRenderer->drawBuffer});
+        }
         shaderUploader->submit(worker, shaderUploads);
+        if (waterRenderer && !waterRenderer->draws.empty()) { waterRenderer->bindBuffer(); waterRenderer->bindNormals(*outputBuffers); }
         updateShaderViews(worker, drawBuffers, outputBuffers, shaderViewRtEnabled);
     }
 

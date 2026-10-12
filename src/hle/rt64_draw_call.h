@@ -13,6 +13,7 @@
 #include "shared/rt64_extra_params.h"
 #include "shared/rt64_rdp_params.h"
 #include "shared/rt64_rdp_tile.h"
+#include "shared/rt64_water_params.h"
 
 #include "rt64_framebuffer.h"
 
@@ -42,7 +43,8 @@ namespace RT64 {
         ObjRenderMode = 25,
         ExtendedType = 26,
         ExtendedFlags = 27,
-        Count = 28
+        WaterMaterial = 28,
+        Count = 29
     };
 
     enum class DrawExtendedType : uint8_t {
@@ -109,6 +111,7 @@ namespace RT64 {
         DrawExtendedType extendedType;
         DrawExtendedData extendedData;
         DrawExtendedFlags extendedFlags;
+        interop::WaterMaterial waterMaterial{};
 
         // Raytracing parameters.
         // TODO: This is likely better pushed elsewhere and using an index

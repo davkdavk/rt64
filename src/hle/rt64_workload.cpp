@@ -150,6 +150,7 @@ namespace RT64 {
 
     void Workload::resetRSPOutputBuffers() {
         outputBuffers.screenPosBuffer.computedSize = 0;
+        outputBuffers.rasterWorldPosBuffer.computedSize = 0;
         outputBuffers.genTexCoordBuffer.computedSize = 0;
         outputBuffers.shadedColBuffer.computedSize = 0;
     }
@@ -240,6 +241,7 @@ namespace RT64 {
         const uint32_t vertexCount = drawData.vertexCount();
         const RenderBufferFlags rtInputFlag = worker->device->getCapabilities().raytracing ? RenderBufferFlag::ACCELERATION_STRUCTURE_INPUT : RenderBufferFlag::NONE;
         updateOutputBuffer(worker, outputBuffers.screenPosBuffer, vertexCount * sizeof(float) * 4, RenderBufferFlag::VERTEX);
+        updateOutputBuffer(worker, outputBuffers.rasterWorldPosBuffer, vertexCount * sizeof(float) * 4, RenderBufferFlag::VERTEX);
         updateOutputBuffer(worker, outputBuffers.genTexCoordBuffer, vertexCount * sizeof(float) * 2, RenderBufferFlag::VERTEX);
         updateOutputBuffer(worker, outputBuffers.shadedColBuffer, vertexCount * sizeof(float) * 4, RenderBufferFlag::VERTEX);
         updateOutputBuffer(worker, outputBuffers.worldPosBuffer, vertexCount * sizeof(float) * 4, rtInputFlag);

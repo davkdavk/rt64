@@ -5,13 +5,115 @@
 #include "common/rt64_math.h"
 
 #include "rt64_game_frame.h"
+#include "rt64_water_interpolation.h"
 #include "rt64_workload_queue.h"
 
 #include "xxHash/xxh3.h"
 
+// wr64: for the transform-pairing counters below.
+#include <unordered_set>
+
+// wr64: running totals of the transform pairing, read by the port through the
+// accessor below. Written on the workload thread and read on the game thread
+// without synchronisation, which is sound enough for a counter that is only
+// ever reported: the reader wants a rate over seconds, not an exact instant.
+static uint64_t wr64PairingFrames = 0;
+static uint64_t wr64PairingTotal = 0;
+static uint64_t wr64PairingUnpaired = 0;
+static uint64_t wr64PairingUnpairedMoved = 0;
+
+extern "C" void RT64_GetTransformPairing(unsigned long long *frames, unsigned long long *total,
+                                         unsigned long long *unpaired, unsigned long long *unpairedMoved) {
+    *frames = wr64PairingFrames;
+    *total = wr64PairingTotal;
+    *unpaired = wr64PairingUnpaired;
+    *unpairedMoved = wr64PairingUnpairedMoved;
+}
+
 namespace RT64 {
     // GameFrame
-    
+
+    namespace {
+        struct WaterMeshContext {
+            WaterInterpolation::History history;
+            std::vector<uint32_t> indices;
+            uint32_t projection = 0;
+            bool tagged = false;
+        };
+
+        WaterMeshContext waterMeshContext(const Workload &workload, uint32_t transformIndex) {
+            WaterMeshContext context;
+            const DrawData &data = workload.drawData;
+            const uint32_t vertexStart = data.worldTransformVertexIndices[transformIndex];
+            const uint32_t vertexCount = data.worldTransformVertexCount(transformIndex);
+            bool conflicting = false;
+            for (uint32_t f = 0; f < workload.fbPairCount; f++) {
+                const FramebufferPair &pair = workload.fbPairs[f];
+                for (uint32_t p = 0; p < pair.projectionCount; p++) {
+                    const Projection &projection = pair.projections[p];
+                    if (projection.type != Projection::Type::Perspective) continue;
+                    for (uint32_t c = 0; c < projection.gameCallCount; c++) {
+                        const GameCall &call = projection.gameCalls[c];
+                        const DrawCall &desc = call.callDesc;
+                        if (transformIndex < desc.minWorldMatrix || transformIndex > desc.maxWorldMatrix || desc.waterMaterial.identity.x <= 0) continue;
+                        const auto &material = desc.waterMaterial;
+                        if (!std::isfinite(material.identity.z) || !std::isfinite(material.identity.w) || material.identity.z < 0 || material.identity.z > 9 ||
+                            material.identity.w < 0 || material.identity.w >= float(UINT32_MAX)) {
+                            context.tagged = true;
+                            conflicting = true;
+                            continue;
+                        }
+                        const auto &scissor = desc.scissorRect;
+                        const std::array<int32_t, 4> bounds = {scissor.ulx, scissor.uly, scissor.lrx, scissor.lry};
+                        if (context.tagged && (context.projection != projection.transformsIndex || context.history.viewport != bounds ||
+                            context.history.course != uint32_t(material.identity.z) || context.history.generation != uint32_t(material.identity.w))) {
+                            conflicting = true;
+                        }
+                        context.tagged = true;
+                        context.projection = projection.transformsIndex;
+                        context.history.course = uint32_t(material.identity.z);
+                        context.history.generation = uint32_t(material.identity.w);
+                        context.history.previousTime = material.animation.x;
+                        context.history.currentTime = material.animation.y;
+                        context.history.viewport = bounds;
+                        const size_t start = call.meshDesc.faceIndicesStart;
+                        const size_t end = start + size_t(desc.triangleCount) * 3;
+                        if (end > data.faceIndices.size()) { conflicting = true; continue; }
+                        for (size_t i = start; i < end; i += 3) {
+                            const uint32_t a = data.faceIndices[i], b = data.faceIndices[i + 1], d = data.faceIndices[i + 2];
+                            if (a < vertexStart || a - vertexStart >= vertexCount || b < vertexStart || b - vertexStart >= vertexCount ||
+                                d < vertexStart || d - vertexStart >= vertexCount) continue;
+                            context.indices.insert(context.indices.end(), {a - vertexStart, b - vertexStart, d - vertexStart});
+                        }
+                    }
+                }
+            }
+            if (!context.tagged || conflicting || context.indices.empty() || context.projection >= data.viewTransforms.size() ||
+                context.projection >= data.projTransforms.size() || context.projection >= data.rspViewports.size() ||
+                size_t(vertexStart) + vertexCount > data.viewProjIndices.size() ||
+                !isMatrixIdentity(data.worldTransforms[transformIndex])) return context;
+            for (uint32_t i = vertexStart; i < vertexStart + vertexCount; i++) {
+                if (data.viewProjIndices[i] != context.projection) return context;
+            }
+            const hlslpp::float4x4 inverseView = hlslpp::inverse(data.viewTransforms[context.projection]);
+            const hlslpp::float3 camera = inverseView[3].xyz;
+            const hlslpp::float3 forward = hlslpp::normalize(inverseView[2].xyz);
+            context.history.camera = {camera[0], camera[1], camera[2]};
+            context.history.forward = {forward[0], forward[1], forward[2]};
+            context.history.valid = true;
+            return context;
+        }
+
+        bool waterViewsCompatible(const Workload &cur, const WaterMeshContext &current, const Workload &prev, const WaterMeshContext &previous) {
+            if (!WaterInterpolation::compatible(current.history, previous.history)) return false;
+            const auto &a = cur.drawData.rspViewports[current.projection];
+            const auto &b = prev.drawData.rspViewports[previous.projection];
+            if (a.scale.x != b.scale.x || a.scale.y != b.scale.y || a.scale.z != b.scale.z ||
+                a.translate.x != b.translate.x || a.translate.y != b.translate.y || a.translate.z != b.translate.z) return false;
+            return matrixDifference(cur.drawData.projTransforms[current.projection], prev.drawData.projTransforms[previous.projection]) < 0.01f;
+        }
+    }
+
     bool GameFrame::areFramebufferPairsCompatible(const WorkloadQueue &workloadQueue, const GameIndices::FramebufferPair &first, const GameIndices::FramebufferPair &second) {
         if (first == second) {
             return true;
@@ -375,6 +477,61 @@ namespace RT64 {
         matchScenes(perspectiveScenes, prevFrame.perspectiveScenes);
         matchScenes(orthographicScenes, prevFrame.orthographicScenes);
 
+        // wr64: count what failed to pair, so the port can report it.
+        //
+        // RT64 interpolates an object by pairing this frame's transform with
+        // the previous frame's; one that finds no pair is drawn at the newer
+        // frame and holds there (see TransformProcessor::process). The plain
+        // count of those is a poor measure, because most of them are the
+        // course's static scenery -- the same matrix every frame, often
+        // submitted twice, which is exactly what ties a matcher that goes by
+        // position -- and an unpaired object that is not moving looks no
+        // different for it.
+        //
+        // So they are counted twice: every transform that found no pair, and
+        // the subset whose matrix appears nowhere in the previous frame at
+        // all. The second number is the one that costs something, because an
+        // object that is both moving and unpaired is an object stepping at the
+        // game's rate while everything around it glides.
+        {
+            thread_local std::unordered_set<uint64_t> wr64PrevMatrices;
+            wr64PrevMatrices.clear();
+            for (uint32_t w : workloads) {
+                const GameFrameMap::WorkloadMap &map = frameMap.workloads[w];
+                if (!map.mapped) {
+                    continue;
+                }
+
+                const Workload &prevWorkload = workloadQueue.workloads[map.prevWorkloadIndex];
+                for (const interop::float4x4 &m : prevWorkload.drawData.worldTransforms) {
+                    wr64PrevMatrices.insert(XXH3_64bits(&m, sizeof(m)));
+                }
+            }
+
+            uint32_t total = 0, unpaired = 0, unpairedMoved = 0;
+            for (uint32_t w : workloads) {
+                const GameFrameMap::WorkloadMap &map = frameMap.workloads[w];
+                const Workload &curWorkload = workloadQueue.workloads[w];
+                for (size_t t = 0; t < map.transforms.size(); t++) {
+                    total++;
+                    if (map.transforms[t].mapped) {
+                        continue;
+                    }
+
+                    unpaired++;
+                    const interop::float4x4 &m = curWorkload.drawData.worldTransforms[t];
+                    if (wr64PrevMatrices.find(XXH3_64bits(&m, sizeof(m))) == wr64PrevMatrices.end()) {
+                        unpairedMoved++;
+                    }
+                }
+            }
+
+            wr64PairingFrames++;
+            wr64PairingTotal += total;
+            wr64PairingUnpaired += unpaired;
+            wr64PairingUnpairedMoved += unpairedMoved;
+        }
+
         if (!workloadsModified.empty()) {
             thread_local std::vector<BufferUploader::Upload> uploads;
             uploads.clear();
@@ -733,6 +890,32 @@ namespace RT64 {
         uint32_t curVertexCount = curWorkload.drawData.worldTransformVertexCount(curTransformIndex);
         uint32_t prevVertexIndex = prevWorkload.drawData.worldTransformVertexIndices[prevTransformIndex];
         uint32_t prevVertexCount = prevWorkload.drawData.worldTransformVertexCount(prevTransformIndex);
+        // wr64: a water index identifies a camera-relative grid slot, not a
+        // persistent world point. Reanchoring it must not translate the waves
+        // or blend an unrelated slope's reflection coordinates into this one.
+        // Only the port's recognized material carries trustworthy reset data.
+        if (curGroup.matrixId == 0x57A00002 && curGroup.vertexInterpolation == G_EX_COMPONENT_INTERPOLATE &&
+            curGroup.texcoordInterpolation == G_EX_COMPONENT_INTERPOLATE && curVertexCount > 0) {
+            const WaterMeshContext current = waterMeshContext(curWorkload, curTransformIndex);
+            if (current.tagged) {
+                float *positionVelocity = curWorkload.drawData.velFloats.data() + curVertexIndex * 3;
+                float *texcoordVelocity = curWorkload.drawData.tcVelFloats.data() + curVertexIndex * 2;
+                std::fill_n(positionVelocity, curVertexCount * 3, 0.0f);
+                std::fill_n(texcoordVelocity, curVertexCount * 2, 0.0f);
+                const WaterMeshContext previous = waterMeshContext(prevWorkload, prevTransformIndex);
+                if (prevVertexCount > 0 && waterViewsCompatible(curWorkload, current, prevWorkload, previous)) {
+                    const WaterInterpolation::PreviousMesh mesh(prevWorkload.drawData.posFloats.data() + prevVertexIndex * 3,
+                        prevWorkload.drawData.tcFloats.data() + prevVertexIndex * 2, prevVertexCount, previous.indices);
+                    mesh.velocities(curWorkload.drawData.posFloats.data() + curVertexIndex * 3,
+                        curWorkload.drawData.tcFloats.data() + curVertexIndex * 2, curVertexCount, positionVelocity, texcoordVelocity);
+                }
+                // New perimeter points and invalid history keep current data;
+                // extrapolating a different patch would invent visible waves.
+                modifiedBuffers.positionVelocity = true;
+                modifiedBuffers.texcoordVelocity = true;
+                return;
+            }
+        }
         if (((curGroup.vertexInterpolation != G_EX_COMPONENT_SKIP) || (curGroup.texcoordInterpolation == G_EX_COMPONENT_AUTO)) && (curVertexCount == prevVertexCount)) {
             const std::vector<float> &curPosFloats = curWorkload.drawData.posFloats;
             const std::vector<float> &prevPosFloats = prevWorkload.drawData.posFloats;

@@ -41,6 +41,35 @@ namespace RT64 {
         return windowCenter + relativeCoordinate * relativeScale;
     }
 
+    // wr64: see contentCrop.
+    inline hlslpp::float2 fromHDtoWindowCropped(hlslpp::float2 coordinate, hlslpp::float2 sdSize, hlslpp::float2 hdSize, hlslpp::float2 windowSize, hlslpp::float4 cropSD) {
+        // The content region in the virtual HD TV's space. The frame may have been
+        // widened (Aspect Ratio: Expand), in which case the horizontal scale is not
+        // the vertical one; the region is placed the way the renderer places 2D
+        // content, at the vertical scale and centered, so what fills the window is
+        // the game's own frame plus however much widened picture fits beside it.
+        const float scale = float(hdSize.y) / float(sdSize.y);
+        const float sdCenterX = float(sdSize.x) / 2.0f;
+        const float hdCenterX = float(hdSize.x) / 2.0f;
+        const float x0 = hdCenterX + (float(cropSD.x) - sdCenterX) * scale;
+        const float x1 = hdCenterX + (float(cropSD.z) - sdCenterX) * scale;
+        const float y0 = float(cropSD.y) * scale;
+        const float y1 = float(cropSD.w) * scale;
+        const float relativeScale = std::min(float(windowSize.x) / (x1 - x0), float(windowSize.y) / (y1 - y0));
+        const float contentCenterX = (x0 + x1) / 2.0f;
+        const float contentCenterY = (y0 + y1) / 2.0f;
+        return {
+            float(windowSize.x) / 2.0f + (float(coordinate.x) - contentCenterX) * relativeScale,
+            float(windowSize.y) / 2.0f + (float(coordinate.y) - contentCenterY) * relativeScale
+        };
+    }
+
+    hlslpp::float4 VIRenderer::contentCrop = hlslpp::float4(0.0f, 0.0f, 0.0f, 0.0f);
+
+    extern "C" void RT64_SetVIContentCrop(float left, float top, float right, float bottom) {
+        VIRenderer::contentCrop = hlslpp::float4(left, top, right, bottom);
+    }
+
     void VIRenderer::render(const RenderParams &p) {
         const ShaderRecord *shader = nullptr;
         const RenderSampler *sampler = nullptr;
@@ -108,18 +137,34 @@ namespace RT64 {
         hlslpp::float4 viViewRect = vi.viewRectangle() * sdSize.xyxy;
         hlslpp::float4 viCropRect = vi.cropRectangle() * sdSize.xyxy;
 
+        // wr64: fit the game's content region to the window when a port has set one.
+        const hlslpp::float4 crop = contentCrop;
+        const bool useCrop = (float(crop.z) > float(crop.x)) && (float(crop.w) > float(crop.y));
+        auto toWindow = [&](hlslpp::float2 coordinate) {
+            return useCrop ? fromHDtoWindowCropped(coordinate, sdSize, hdSize, windowSize, crop) : fromHDtoWindow(coordinate, hdSize, windowSize);
+        };
+
         // Scale all the rectangles to the space of the Window.
         hlslpp::float2 topLeftViewport = fromSDtoHD({ float(viViewRect.x), float(viViewRect.y) }, sdSize, hdSize);
         hlslpp::float2 bottomRightViewport = fromSDtoHD({ float(viViewRect.x + viViewRect.z), float(viViewRect.y + viViewRect.w) }, sdSize, hdSize);
-        topLeftViewport = fromHDtoWindow(topLeftViewport, hdSize, windowSize);
-        bottomRightViewport = fromHDtoWindow(bottomRightViewport, hdSize, windowSize);
+        topLeftViewport = toWindow(topLeftViewport);
+        bottomRightViewport = toWindow(bottomRightViewport);
 
         hlslpp::float2 topLeftScissor = fromSDtoHD({ float(viCropRect.x), float(viCropRect.y) }, sdSize, hdSize);
         hlslpp::float2 bottomRightScissor = fromSDtoHD({ float(viCropRect.x + viCropRect.z), float(viCropRect.y + viCropRect.w) }, sdSize, hdSize);
-        topLeftScissor = fromHDtoWindow(topLeftScissor, hdSize, windowSize);
-        bottomRightScissor = fromHDtoWindow(bottomRightScissor, hdSize, windowSize);
+        topLeftScissor = toWindow(topLeftScissor);
+        bottomRightScissor = toWindow(bottomRightScissor);
 
         viewport = RenderViewport(topLeftViewport.x, topLeftViewport.y, bottomRightViewport.x - topLeftViewport.x, bottomRightViewport.y - topLeftViewport.y);
         scissor = RenderRect(lround(topLeftScissor.x), lround(topLeftScissor.y), lround(bottomRightScissor.x), lround(bottomRightScissor.y));
+
+        // wr64: the crop pushes the VI's rectangle past the window's edges, and a
+        // scissor must stay inside the render target.
+        if (useCrop) {
+            scissor.left = std::max(scissor.left, 0);
+            scissor.top = std::max(scissor.top, 0);
+            scissor.right = std::min(scissor.right, int32_t(windowSize.x));
+            scissor.bottom = std::min(scissor.bottom, int32_t(windowSize.y));
+        }
     }
 };

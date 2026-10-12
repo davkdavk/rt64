@@ -17,15 +17,30 @@ namespace RT64 {
     }
 
     PresentQueue::~PresentQueue() {
-        presentThreadRunning = false;
-        cursorCondition.notify_all();
+        requestStop();
+        joinThreads();
+    }
 
+    void PresentQueue::requestStop() {
+        {
+            const std::scoped_lock lock(cursorMutex, presentIdMutex);
+            presentThreadRunning = false;
+        }
+        cursorCondition.notify_all();
+        presentIdCondition.notify_all();
+        if (ext.sharedResources != nullptr) {
+            // Close the predicate-check / wait-registration race.
+            const std::scoped_lock lock(ext.sharedResources->interpolatedMutex);
+            ext.sharedResources->interpolatedCondition.notify_all();
+        }
+    }
+
+    void PresentQueue::joinThreads() {
         if (presentThread != nullptr) {
             presentThread->join();
             delete presentThread;
+            presentThread = nullptr;
         }
-
-        presentIdCondition.notify_all();
     }
 
     void PresentQueue::reset() {
@@ -266,15 +281,16 @@ namespace RT64 {
             }
         }
         
-        for (int32_t i = 0; i < framesToPresent; i++) {
+        for (int32_t i = 0; i < framesToPresent && presentThreadRunning; i++) {
             uint32_t frameCountersNextPresented = 0;
             if ((framesToPresent > 1) && (usingMSAA || (i > 0))) {
                 // Stall until the interpolated color target is available.
                 const uint32_t targetIndex = usingMSAA ? i : (i - 1);
                 std::unique_lock<std::mutex> interpolatedLock(ext.sharedResources->interpolatedMutex);
                 ext.sharedResources->interpolatedCondition.wait(interpolatedLock, [&]() {
-                    return (frameCounters.available > targetIndex) || ((frameCounters.available == targetIndex) && frameCounters.skipped);
+                    return !presentThreadRunning || (frameCounters.available > targetIndex) || ((frameCounters.available == targetIndex) && frameCounters.skipped);
                 });
+                if (!presentThreadRunning) break;
 
                 // Do not present any more frames after this one after reaching the last available frame if the workload was skipped.
                 if ((frameCounters.available == targetIndex) && frameCounters.skipped) {
@@ -404,6 +420,9 @@ namespace RT64 {
                 presentProfiler.logAndRestart();
             }
         }
+
+        // Shutdown may cancel the loop before its first presentation.
+        if (lockedWorkloadMutex) ext.sharedResources->workloadMutex.unlock();
     }
 
     void PresentQueue::skipInterpolation() {
@@ -462,6 +481,8 @@ namespace RT64 {
                     skipPresent = (writeCursor != threadCursor);
                 }
             }
+
+            if (!presentThreadRunning) break;
 
             if (processCursor >= 0) {
                 std::unique_lock<std::mutex> threadLock(threadMutex);

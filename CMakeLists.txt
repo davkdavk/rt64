@@ -5,7 +5,9 @@ set(CMAKE_CXX_VISIBILITY_PRESET hidden)
 
 if (APPLE)
     enable_language(OBJC OBJCXX)
-    set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15")
+    if(NOT CMAKE_OSX_DEPLOYMENT_TARGET)
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "10.15")
+    endif()
 endif()
 
 option(RT64_STATIC "Build RT64 as a static library" OFF)
@@ -57,6 +59,9 @@ elseif (APPLE)
         set (DXC "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/arm64:${ZLIB_PATH}" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/arm64/dxc-macos")
         set (SPIRVCROSS "DYLD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/lib/arm64:$ENV{DYLD_LIBRARY_PATH}" "${PROJECT_SOURCE_DIR}/src/contrib/spirv-cross/bin/arm64/spirv-cross")
     endif()
+elseif (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+    # Shader compilers run on the build host, not on the Android target.
+    set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
 else()
     if (CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
         set (DXC "LD_LIBRARY_PATH=${PROJECT_SOURCE_DIR}/src/contrib/dxc/lib/x64" "${PROJECT_SOURCE_DIR}/src/contrib/dxc/bin/x64/dxc-linux")
@@ -70,11 +75,16 @@ set(ZSTD_BUILD_STATIC ON)
 set(ZSTD_BUILD_SHARED OFF)
 
 add_subdirectory(src/tools/file_to_c)
+if(NOT WR64_FILE_TO_C)
+    set(WR64_FILE_TO_C "$<TARGET_FILE:file_to_c>")
+endif()
 add_subdirectory(src/contrib/re-spirv)
-add_subdirectory(src/contrib/nativefiledialog-extended)
+if(NOT (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
+    add_subdirectory(src/contrib/nativefiledialog-extended)
+endif()
 add_subdirectory(src/contrib/zstd/build/cmake)
 
-if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+if ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android") AND RT64_SDL_WINDOW_VULKAN)
     set(PLUME_SDL_VULKAN_ENABLED TRUE)
 elseif (APPLE)
     set(PLUME_APPLE_RETINA_ENABLED OFF)
@@ -116,9 +126,9 @@ set (DXC_RT_OPTS "${DXC_COMMON_OPTS}" "-D" "RT_SHADER" "-T" "lib_6_3" "-fspv-tar
 function(build_shader_spirv_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
     add_custom_command(OUTPUT ${OUTNAME}.spv
         COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
-        DEPENDS ${FILENAME})
+        DEPENDS ${FILENAME} ${SHADER_EXTRA_DEPS})
     add_custom_command(OUTPUT ${OUTNAME}.spirv.c
-        COMMAND file_to_c ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
+        COMMAND ${WR64_FILE_TO_C} ${OUTNAME}.spv ${TARGET_NAME}BlobSPIRV ${OUTNAME}.spirv.c ${OUTNAME}.spirv.h
         DEPENDS ${OUTNAME}.spv file_to_c
         BYPRODUCTS ${OUTNAME}.spirv.h)
     target_sources(${TARGETOBJ} PRIVATE ${OUTNAME}.spirv.c)
@@ -127,7 +137,7 @@ endfunction()
 function(build_shader_dxil_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
     add_custom_command(OUTPUT ${OUTNAME}.dxil
         COMMAND ${DXC} ${DXC_DXIL_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.dxil
-        DEPENDS ${FILENAME})
+        DEPENDS ${FILENAME} ${SHADER_EXTRA_DEPS})
     add_custom_command(OUTPUT ${OUTNAME}.dxil.c
         COMMAND file_to_c ${OUTNAME}.dxil ${TARGET_NAME}BlobDXIL ${OUTNAME}.dxil.c ${OUTNAME}.dxil.h
         DEPENDS ${OUTNAME}.dxil file_to_c
@@ -138,12 +148,12 @@ endfunction()
 function(build_shader_msl_impl TARGETOBJ FILENAME TARGET_NAME OUTNAME)
     add_custom_command(OUTPUT ${OUTNAME}.spv
             COMMAND ${DXC} ${DXC_SPV_OPTS} ${ARGN} ${FILENAME} /Fo ${OUTNAME}.spv
-            DEPENDS ${FILENAME})
+            DEPENDS ${FILENAME} ${SHADER_EXTRA_DEPS})
     add_custom_command(OUTPUT ${OUTNAME}.metal
             COMMAND spirv_cross_msl ${OUTNAME}.spv ${OUTNAME}.metal
             DEPENDS ${OUTNAME}.spv spirv_cross_msl)
     add_custom_command(OUTPUT ${OUTNAME}.ir
-            COMMAND xcrun -sdk macosx metal -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
+            COMMAND xcrun -sdk macosx metal -mmacosx-version-min=${CMAKE_OSX_DEPLOYMENT_TARGET} -o ${OUTNAME}.ir -c ${OUTNAME}.metal $<$<CONFIG:Debug>:-frecord-sources>
             DEPENDS ${OUTNAME}.metal)
     add_custom_command(OUTPUT ${OUTNAME}.metallib
             COMMAND xcrun -sdk macosx metallib ${OUTNAME}.ir -o ${OUTNAME}.metallib
@@ -157,6 +167,9 @@ endfunction()
 
 function(build_shader TARGETOBJ SHADERNAME OPTIONS)
     set(FILENAME "${PROJECT_SOURCE_DIR}/${SHADERNAME}")
+    if (SHADERNAME MATCHES "/Water")
+        set(SHADER_EXTRA_DEPS "${PROJECT_SOURCE_DIR}/src/shared/rt64_water_params.h")
+    endif()
     if (${ARGC} GREATER 3)
         set(OUTNAME "${CMAKE_BINARY_DIR}/${ARGV3}")
     else()
@@ -243,7 +256,7 @@ function(preprocess_shader TARGETOBJ SHADERNAME)
     cmake_path(GET OUTNAME PARENT_PATH OUTPUT_DIR)
     preprocess(${FILENAME} ${OUTNAME}.rw ${DXC_COMMON_OPTS})
     add_custom_command(OUTPUT ${OUTNAME}.rw.c
-        COMMAND file_to_c ${OUTNAME}.rw ${TARGET_NAME}Text ${OUTNAME}.rw.c ${OUTNAME}.rw.h
+            COMMAND ${WR64_FILE_TO_C} ${OUTNAME}.rw ${TARGET_NAME}Text ${OUTNAME}.rw.c ${OUTNAME}.rw.h
         DEPENDS ${OUTNAME}.rw file_to_c
         BYPRODUCTS ${OUTNAME}.rw.h)
     file(MAKE_DIRECTORY ${OUTPUT_DIR})
@@ -289,6 +302,9 @@ if (WIN32)
     set(SDL2_INCLUDE_DIRS "${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/include")
     set(SDL2_LIBRARIES "SDL2" "SDL2main")
     link_directories("${PROJECT_SOURCE_DIR}/src/contrib/mupen64plus-win32-deps/SDL2-2.26.3/lib/x64")
+elseif (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android")
+    set(SDL2_INCLUDE_DIRS "${sdl2_SOURCE_DIR}/include")
+    set(SDL2_LIBRARIES SDL2-shared)
 else()
     find_package(SDL2 REQUIRED)
 endif()
@@ -301,7 +317,7 @@ add_compile_definitions(
     IMGUI_IMPL_VULKAN_NO_PROTOTYPES
 )
 
-if (CMAKE_SYSTEM_NAME MATCHES "Linux" AND RT64_SDL_WINDOW_VULKAN)
+if ((CMAKE_SYSTEM_NAME MATCHES "Linux" OR CMAKE_SYSTEM_NAME STREQUAL "Android") AND RT64_SDL_WINDOW_VULKAN)
     add_compile_definitions("PLUME_SDL_VULKAN_ENABLED")
     add_compile_definitions("RT64_SDL_WINDOW_VULKAN")
 endif()
@@ -339,7 +355,8 @@ set (SOURCES
 
     "${PROJECT_SOURCE_DIR}/src/gui/rt64_camera_controller.cpp"
     "${PROJECT_SOURCE_DIR}/src/gui/rt64_debugger_inspector.cpp"
-    "${PROJECT_SOURCE_DIR}/src/gui/rt64_file_dialog.cpp"
+    $<$<NOT:$<OR:$<BOOL:${ANDROID}>,$<STREQUAL:${CMAKE_SYSTEM_NAME},Android>>>:${PROJECT_SOURCE_DIR}/src/gui/rt64_file_dialog.cpp>
+    $<$<OR:$<BOOL:${ANDROID}>,$<STREQUAL:${CMAKE_SYSTEM_NAME},Android>>:${PROJECT_SOURCE_DIR}/src/gui/rt64_file_dialog_android.cpp>
     "${PROJECT_SOURCE_DIR}/src/gui/rt64_inspector.cpp"
 
     "${PROJECT_SOURCE_DIR}/src/hle/rt64_application.cpp"
@@ -370,6 +387,7 @@ set (SOURCES
 
     "${PROJECT_SOURCE_DIR}/src/render/rt64_buffer_uploader.cpp"
     "${PROJECT_SOURCE_DIR}/src/render/rt64_framebuffer_renderer.cpp"
+    "${PROJECT_SOURCE_DIR}/src/render/rt64_water_renderer.cpp"
     "${PROJECT_SOURCE_DIR}/src/render/rt64_geometry_mode.cpp"
     "${PROJECT_SOURCE_DIR}/src/render/rt64_look_at_processor.cpp"
     "${PROJECT_SOURCE_DIR}/src/render/rt64_native_target.cpp"
@@ -441,7 +459,9 @@ set_target_properties(rt64 PROPERTIES PREFIX "")
 
 # Add common libraries.
 target_link_libraries(rt64 re-spirv)
-target_link_libraries(rt64 nfd)
+if(NOT (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
+    target_link_libraries(rt64 nfd)
+endif()
 target_link_libraries(rt64 libzstd_static)
 target_link_libraries(rt64 plume)
 
@@ -478,7 +498,7 @@ endif()
 
 target_link_directories(rt64 PRIVATE ${PROJECT_SOURCE_DIR}/src/contrib/dxc)
 
-if (NOT ANDROID)
+if (NOT (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
     target_link_libraries(rt64 ${SDL2_LIBRARIES})
 endif()
 
@@ -500,10 +520,16 @@ endif()
 
 build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
 build_pixel_shader(  rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSDynamicMS.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSDynamicNoDualSrc.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D NO_DUAL_SRC_BLEND")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSDynamicMSNoDualSrc.hlsl" "-D DYNAMIC_RENDER_PARAMS" "-D MULTISAMPLING" "-D NO_DUAL_SRC_BLEND")
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING")
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
 build_pixel_shader_spec_constants(rt64 "src/shaders/RasterPS.hlsl" "src/shaders/RasterPSSpecConstantFlatMS.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSSpecConstantNoDualSrc.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D NO_DUAL_SRC_BLEND")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSSpecConstantMSNoDualSrc.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D MULTISAMPLING" "-D NO_DUAL_SRC_BLEND")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSSpecConstantFlatNoDualSrc.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D NO_DUAL_SRC_BLEND")
+build_shader_spirv(rt64 "src/shaders/RasterPS.hlsl" "${DXC_PS_OPTS}" "src/shaders/RasterPSSpecConstantFlatMSNoDualSrc.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR" "-D MULTISAMPLING" "-D NO_DUAL_SRC_BLEND")
 build_vertex_shader( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSDynamic.hlsl" "-D DYNAMIC_RENDER_PARAMS")
 build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstant.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS")
 build_vertex_shader_spec_constants( rt64 "src/shaders/RasterVS.hlsl" "src/shaders/RasterVSSpecConstantFlat.hlsl" "-D SPEC_CONSTANT_RENDER_PARAMS" "-D VERTEX_FLAT_COLOR")
@@ -529,6 +555,22 @@ build_pixel_shader(  rt64 "src/shaders/PostBlendDitherNoisePS.hlsl" "src/shaders
 build_pixel_shader(  rt64 "src/shaders/PostBlendDitherNoisePS.hlsl" "src/shaders/PostBlendDitherNoiseSubNegativePS.hlsl" "-D SUB_MODE" "-D NEGATIVE_MODE")
 build_compute_shader(rt64 "src/shaders/RSPModifyCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPProcessCS.hlsl")
+build_vertex_shader(rt64 "src/shaders/WaterVS.hlsl")
+build_pixel_shader(rt64 "src/shaders/WaterPS.hlsl")
+build_pixel_shader(rt64 "src/shaders/WaterPS.hlsl" "src/shaders/WaterClassicPS.hlsl" "-D" "CLASSIC_STYLE")
+build_pixel_shader(rt64 "src/shaders/WaterPS.hlsl" "src/shaders/WaterClassicMSPS.hlsl" "-D" "CLASSIC_STYLE" "-D" "CLASSIC_MSAA")
+build_compute_shader(rt64 "src/shaders/WaterNormalsCS.hlsl")
+build_compute_shader(rt64 "src/shaders/WaterCaptureCS.hlsl")
+build_compute_shader(rt64 "src/shaders/WaterCaptureCS.hlsl" "src/shaders/WaterCaptureMSCS.hlsl" "-D" "CAPTURE_MSAA")
+build_compute_shader(rt64 "src/shaders/WaterOriginalCS.hlsl")
+build_compute_shader(rt64 "src/shaders/WaterOriginalCS.hlsl" "src/shaders/WaterOriginalMSCS.hlsl" "-D" "CAPTURE_MSAA")
+build_compute_shader(rt64 "src/shaders/WaterDepthReduceCS.hlsl")
+build_compute_shader(rt64 "src/shaders/WaterFieldCS.hlsl")
+build_compute_shader(rt64 "src/shaders/WaterStatsCS.hlsl")
+build_pixel_shader(rt64 "src/shaders/WaterSurfacePS.hlsl")
+build_vertex_shader(rt64 "src/shaders/WaterSprayVS.hlsl")
+build_pixel_shader(rt64 "src/shaders/WaterSprayPS.hlsl")
+build_pixel_shader(rt64 "src/shaders/WaterSprayPS.hlsl" "src/shaders/WaterSprayMSPS.hlsl" "-D" "SPRAY_MSAA")
 build_compute_shader(rt64 "src/shaders/RSPWorldCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPSmoothNormalCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPVertexTestZCS.hlsl")
@@ -556,4 +598,3 @@ build_pixel_shader(  rt64 "src/shaders/Im3DPS.hlsl")
 build_pixel_shader(  rt64 "src/shaders/PostProcessPS.hlsl")
 
 target_include_directories(rt64 PRIVATE ${CMAKE_BINARY_DIR}/src)
-

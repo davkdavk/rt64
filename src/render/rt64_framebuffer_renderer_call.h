@@ -22,6 +22,8 @@ namespace RT64 {
         };
 
         Type type;
+        uint32_t waterIndex = UINT32_MAX;
+        const RenderPipeline *originalWaterPipeline = nullptr;
 
         union {
             struct {

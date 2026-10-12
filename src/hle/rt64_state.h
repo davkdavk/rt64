@@ -84,6 +84,7 @@ namespace RT64 {
         std::vector<uint64_t> evictedTextureHashes;
         std::unique_ptr<RenderTarget> dummyDepthTarget;
         DrawCall drawCall;
+        interop::WaterMaterial waterMaterial{};
         DrawStatus drawStatus;
         SpriteCommand activeSpriteCommand;
         bool addLightsOnFlush;

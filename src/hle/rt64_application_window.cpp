@@ -11,7 +11,7 @@
 #if defined(_WIN32)
 #   include <Windows.h>
 #   include <ShellScalingAPI.h>
-#elif defined(__linux__)
+#elif defined(__linux__) && !defined(__ANDROID__)
 #   define Status int
 #   if !defined(RT64_SDL_WINDOW_VULKAN)
 #      include <X11/extensions/Xrandr.h>
@@ -52,7 +52,11 @@ namespace RT64 {
         windowHandle = window;
 
 #   if defined(RT64_SDL_WINDOW_VULKAN)
-        sdlWindow = window;
+#       if defined(__ANDROID__)
+        sdlWindow = SDL_GetWindowFromID(1);
+#       else
+         sdlWindow = window;
+#       endif
 #   endif
 
 #   if defined(__APPLE__)
@@ -104,7 +108,10 @@ namespace RT64 {
         bounds.width = rect.right - rect.left;
         bounds.height = rect.bottom - rect.top;
 #   elif defined(__ANDROID__)
-        static_assert(false && "Android unimplemented");
+         bounds.left = 0;
+         bounds.top = 0;
+         bounds.width = Width;
+         bounds.height = Height;
 #   elif defined(__linux__) || defined(__APPLE__)
         if (SDL_VideoInit(nullptr) != 0) {
             printf("Failed to init SDL2 video: %s\n", SDL_GetError());
@@ -145,10 +152,10 @@ namespace RT64 {
         SDL_GetWindowWMInfo(sdlWindow, &wmInfo);
 #   if defined(_WIN32)
         windowHandle = wmInfo.info.win.window;
+#   elif defined(__ANDROID__) && !defined(RT64_SDL_WINDOW_VULKAN)
+         windowHandle = wmInfo.info.android.window;
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
-        windowHandle = sdlWindow;
-#   elif defined(__ANDROID__)
-        static_assert(false && "Android unimplemented");
+         windowHandle = sdlWindow;
 #   elif defined(__linux__)
         windowHandle.display = wmInfo.info.x11.display;
         windowHandle.window = wmInfo.info.x11.window;
@@ -231,9 +238,9 @@ namespace RT64 {
         windowWrapper->toggleFullscreen();
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
         if (newFullScreen) {
-            SDL_SetWindowFullscreen(windowHandle, SDL_WINDOW_FULLSCREEN_DESKTOP);
+            SDL_SetWindowFullscreen(sdlWindow, SDL_WINDOW_FULLSCREEN_DESKTOP);
         } else {
-            SDL_SetWindowFullscreen(windowHandle, 0);
+            SDL_SetWindowFullscreen(sdlWindow, 0);
         }
         fullScreen = newFullScreen;
 #   endif
@@ -280,7 +287,7 @@ namespace RT64 {
             refreshRate++;
         }
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
-        int displayIndex = SDL_GetWindowDisplayIndex(windowHandle);
+        int displayIndex = SDL_GetWindowDisplayIndex(sdlWindow);
         if (displayIndex < 0) {
             fprintf(stderr, "SDL_GetWindowDisplayIndex failed. Error: %s.\n", SDL_GetError());
             return;
@@ -348,7 +355,7 @@ namespace RT64 {
         newWindowLeft = rect.left;
         newWindowTop = rect.top;
 #   elif defined(RT64_SDL_WINDOW_VULKAN)
-        SDL_GetWindowPosition(windowHandle, &newWindowLeft, &newWindowTop);
+        SDL_GetWindowPosition(sdlWindow, &newWindowLeft, &newWindowTop);
 #   elif defined(__linux__)
         XWindowAttributes attributes;
         XGetWindowAttributes(windowHandle.display, windowHandle.window, &attributes);

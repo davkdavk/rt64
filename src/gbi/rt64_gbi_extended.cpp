@@ -3,6 +3,7 @@
 //
 
 #include "rt64_gbi_extended.h"
+#include <cstddef>
 
 #include "../include/rt64_extended_gbi.h"
 
@@ -10,6 +11,25 @@ namespace RT64 {
     namespace GBI_EXTENDED {
         static GBIFunction Map[G_EX_MAX];
         static bool MapInitialized = false;
+
+        void waterMaterialV1(State *state, DisplayList **dl) {
+            interop::WaterMaterial material{};
+            const uint32_t version = (*dl)->w1;
+            if (version == 1 || version == 2) {
+                // V2 appends preferences. Preserve V1 input with spray enabled.
+                material.effects.x = 1.0f;
+                const size_t payloadBytes = version == 1 ? offsetof(interop::WaterMaterial, effects) : sizeof(material);
+                // Inline native words: copy now, before the game reuses its display-list memory.
+                auto *dst = reinterpret_cast<uint32_t *>(&material);
+                for (size_t i = 0; i < payloadBytes / 8; ++i) {
+                    ++(*dl);
+                    dst[i * 2] = (*dl)->w0;
+                    dst[i * 2 + 1] = (*dl)->w1;
+                }
+            }
+            state->waterMaterial = material;
+            state->updateDrawStatusAttribute(DrawAttribute::WaterMaterial);
+        }
 
         void noOp(State *state, DisplayList **dl) {
             // Does nothing.
@@ -387,6 +407,7 @@ namespace RT64 {
         }
 
         void initialize() {
+            Map[G_EX_WATER_MATERIAL_V1] = &waterMaterialV1;
             Map[G_EX_NOOP] = &noOp;
             Map[G_EX_PRINT] = &print;
             Map[G_EX_TEXRECT_V1] = &texrectV1;

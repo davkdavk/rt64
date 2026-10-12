@@ -101,11 +101,11 @@ float4 clampWrapMirrorSample(const RDPTile rdpTile, const GPUTile gpuTile, float
 
     // Check if tile requires TMEM decoding and sample using dynamic decoding.
     if (gpuTileUsesTMEM) {
-        return sampleTMEM(texelInt, rdpTile.siz, rdpTile.fmt, rdpTile.address, rdpTile.stride, tlut, rdpTile.palette, gTMEM[NonUniformResourceIndex(gpuTile.textureIndex)]);
+        return sampleTMEM(texelInt, rdpTile.siz, rdpTile.fmt, rdpTile.address, rdpTile.stride, tlut, rdpTile.palette, gTMEM[RT64_RESOURCE_INDEX(gpuTile.textureIndex)]);
     }
     // Sample the color version directly.
     else {
-        return gTextures[NonUniformResourceIndex(gpuTile.textureIndex)].Load(int3(texelInt, mipLevel));
+        return gTextures[RT64_RESOURCE_INDEX(gpuTile.textureIndex)].Load(int3(texelInt, mipLevel));
     }
 }
 
@@ -140,6 +140,9 @@ float4 sampleTextureNative(Texture2D texture, uint nativeSampler, int2 texelBase
 }
 
 float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool filterBilerp, bool filterAverage, bool linearFiltering, float2 uvCoord, uint tlut, bool canDecodeTMEM, uint mipLevel, bool usesHDR) {
+    if ((gpuTile.flags.y | gpuTile.flags.z | gpuTile.flags.w) != 0) {
+        return float4(0, 0, 0, 0);
+    }
     float2 tcScale = gpuTile.tcScale;
     float mipScale = float(1U << mipLevel);
     uvCoord /= mipScale;
@@ -149,7 +152,7 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
     bool filtering = or(filterBilerp, linearFiltering);
     float4 samples[4];
     const uint nativeSampler = rdpTile.nativeSampler;
-    bool gpuTileUsesTMEM = canDecodeTMEM && gpuTileFlagRawTMEM(gpuTile.flags);
+    bool gpuTileUsesTMEM = canDecodeTMEM && gpuTileFlagRawTMEM(gpuTile.flags.x);
     if ((nativeSampler == NATIVE_SAMPLER_NONE) || gpuTileUsesTMEM) {
 #if USE_FOR_LOOPS
         int numSamples = select_uint(filtering, 4, 1);
@@ -168,7 +171,7 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
 #endif
     }
     else {
-        Texture2D texture = gTextures[NonUniformResourceIndex(gpuTile.textureIndex)];
+        Texture2D texture = gTextures[RT64_RESOURCE_INDEX(gpuTile.textureIndex)];
 #if USE_FOR_LOOPS
         int numSamples = select_uint(filtering, 4, 1);
         [unroll]
@@ -223,7 +226,7 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
     float2 uvCoord = inputUV * perspCorrectionMod * float2(rdpTile.shifts, rdpTile.shiftt);
 
 #if SIMULATE_LOW_PRECISION
-    if (!gpuTileFlagHighRes(gpuTile.flags)) {
+    if (!gpuTileFlagHighRes(gpuTile.flags.x)) {
         // Simulates the lower precision of the hardware's coordinate interpolation.
         // This is not simulated if a texture replacement is being used.
         uvCoord = round(uvCoord * LowPrecision) / LowPrecision;
@@ -236,7 +239,7 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
         uvCoord.x += 1.0f;
     }
     
-    const bool flagShiftedByHalf = gpuTileFlagShiftedByHalf(gpuTile.flags);
+    const bool flagShiftedByHalf = gpuTileFlagShiftedByHalf(gpuTile.flags.x);
     if (flagShiftedByHalf) {
         uvCoord += float2(0.5f, 0.5f);
     }
@@ -253,7 +256,7 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
 #if FIX_UPSCALING_PRECISION
     // Account for the fact that scaling can result in less than perfect results that affect the quality of point filtering.
     // This helps with artifacts caused by copying high resolution tiles onto other textures in non-square ratios.
-    if (!filterBilerp && !linearFiltering && gpuTileFlagHighRes(gpuTile.flags)) {
+    if (!filterBilerp && !linearFiltering && gpuTileFlagHighRes(gpuTile.flags.x)) {
         const float HighResPrecision = 8.0f;
         uvCoord = round(uvCoord * HighResPrecision) / HighResPrecision;
     }
@@ -263,7 +266,7 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
     const bool canDecodeTMEM = renderFlagCanDecodeTMEM(renderFlags);
     const bool usesHDR = renderFlagUsesHDR(renderFlags);
     const uint nativeSampler = rdpTile.nativeSampler;
-    const bool flagHasMipmaps = gpuTileFlagHasMipmaps(gpuTile.flags);
+    const bool flagHasMipmaps = gpuTileFlagHasMipmaps(gpuTile.flags.x);
     uint numRDPSamples = 0;
     uint RDPMipLevels[2];
     RDPMipLevels[0] = 0;
@@ -273,16 +276,19 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
     // Determine the RDP sample count and mip levels.
     if (flagHasMipmaps) {
         // Retrieve the dimensions of the texture for either type of sampler.
-        Texture2D texture = gTextures[NonUniformResourceIndex(gpuTile.textureIndex)];
+        Texture2D texture = gTextures[RT64_RESOURCE_INDEX(gpuTile.textureIndex)];
         if (nativeSampler == NATIVE_SAMPLER_NONE) {
             float2 ddxUVScaled = ddxUV * gpuTile.tcScale;
             float2 ddyUVScaled = ddyUV * gpuTile.tcScale;
             float ddMax = max(dot(ddxUVScaled, ddxUVScaled), dot(ddyUVScaled, ddyUVScaled));
             float mipBias = -0.25f;
-            mip = 0.5 * log2(ddMax) + mipBias;
             float maxMip = float(gpuTile.textureDimensions.z - 1);
-            RDPMipLevels[0] = min(floor(mip), maxMip);
-            RDPMipLevels[1] = min(floor(mip) + 1, maxMip);
+            // Magnification must stay on mip zero. Bound the floating-point
+            // LOD before converting to unsigned levels, and keep zero UV
+            // derivatives finite so the trilinear weight cannot become NaN.
+            mip = clamp(0.5 * log2(max(ddMax, 1.0e-8f)) + mipBias, 0.0f, maxMip);
+            RDPMipLevels[0] = uint(floor(mip));
+            RDPMipLevels[1] = min(RDPMipLevels[0] + 1U, uint(maxMip));
             numRDPSamples = 2;
         }
         else {
@@ -349,7 +355,7 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
     
     // Alpha channel in framebuffer textures represent the coverage. A modulo operation must be performed
     // to get the value that would correspond to the alpha channel when it's sampled.
-    if (gpuTileFlagAlphaIsCvg(gpuTile.flags)) {
+    if (gpuTileFlagAlphaIsCvg(gpuTile.flags.x)) {
         const float cvgRange = usesHDR ? 65535.0f : 255.0f;
         int cvgModulo = round(textureColor.a * cvgRange) % 8;
         textureColor.a = (cvgModulo & 0x4) ? 1.0f : 0.0f;

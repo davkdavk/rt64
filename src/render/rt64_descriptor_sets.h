@@ -527,6 +527,7 @@ namespace RT64 {
         uint32_t dstPos;
         uint32_t dstTc;
         uint32_t dstCol;
+        uint32_t dstWorld;
 
         RSPProcessDescriptorSet(RenderDevice *device = nullptr) {
             builder.begin();
@@ -551,6 +552,7 @@ namespace RT64 {
             dstPos = builder.addReadWriteStructuredBuffer(19);
             dstTc = builder.addReadWriteStructuredBuffer(20);
             dstCol = builder.addReadWriteStructuredBuffer(21);
+            dstWorld = builder.addReadWriteStructuredBuffer(22);
             builder.end();
 
             if (device != nullptr) {
