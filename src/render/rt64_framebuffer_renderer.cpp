@@ -229,10 +229,6 @@ namespace RT64 {
         textureCacheSize = std::min(textureCacheSize, uint32_t(RT64_TEXTURE_ARRAY_SIZE_FIXED));
         textureCacheFreeSpaces.erase(std::remove_if(textureCacheFreeSpaces.begin(), textureCacheFreeSpaces.end(),
             [](uint32_t index) { return index >= RT64_TEXTURE_ARRAY_SIZE_FIXED; }), textureCacheFreeSpaces.end());
-        textureCacheSlotMap.assign(textureCacheTextures.size(), UINT32_MAX);
-        textureCacheMappedIndices.clear();
-        textureCacheUsedSlots.assign(RT64_TEXTURE_ARRAY_SIZE_FIXED, false);
-        textureCacheEvictionCursor = 0;
 #endif
         textureCacheGlobalVersion = textureCache->textureMap.globalVersion;
         textureCacheReplacementMapEnabled = textureCache->textureMap.replacementMapEnabled;
@@ -275,11 +271,26 @@ namespace RT64 {
                 bool textureReplaced = false;
                 bool hasMipmaps = false;
                 bool shiftedByHalf = false;
-                textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
+                const bool textureFound = textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex,
+                    gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
 
 #if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
-                if (textureIndex < textureCacheSlotMap.size()) {
-                    textureIndex = getFixedTextureSlot(textureIndex);
+                if (textureFound && textureIndex < textureCacheTextures.size() && textureCacheTextures[textureIndex] != nullptr) {
+                    Texture *cacheTexture = textureCacheTextures[textureIndex];
+                    const RenderTexture *residentTexture = nullptr;
+                    if (textureReplaced && textureCacheTextureReplacements[textureIndex] != nullptr) {
+                        residentTexture = textureCacheTextureReplacements[textureIndex]->texture.get();
+                    }
+                    else if (cacheTexture->texture != nullptr) {
+                        residentTexture = cacheTexture->texture.get();
+                    }
+                    else {
+                        residentTexture = cacheTexture->tmem.get();
+                    }
+                    textureIndex = acquireFixedTextureSlot((UINT64_C(1) << 63) | textureIndex, residentTexture);
+                }
+                else {
+                    textureIndex = acquireFixedTextureSlot(0, dummyColorTarget.get(), dummyColorTargetView.get());
                 }
 #endif
 
@@ -300,23 +311,12 @@ namespace RT64 {
     }
 
     uint32_t FramebufferRenderer::getDestinationIndex() {
-        uint32_t dstIndex;
 #if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
-        for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
-            const uint32_t candidate = (textureCacheEvictionCursor + i) % RT64_TEXTURE_ARRAY_SIZE_FIXED;
-            if (!textureCacheUsedSlots[candidate]) {
-                textureCacheUsedSlots[candidate] = true;
-                textureCacheEvictionCursor = (candidate + 1) % RT64_TEXTURE_ARRAY_SIZE_FIXED;
-                return candidate;
-            }
-        }
-#endif
-        if (textureCacheFreeSpaces.empty()) {
-#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
-            dstIndex = textureCacheEvictionCursor++ % RT64_TEXTURE_ARRAY_SIZE_FIXED;
+        return UINT32_MAX;
 #else
+        uint32_t dstIndex;
+        if (textureCacheFreeSpaces.empty()) {
             dstIndex = textureCacheSize++;
-#endif
         }
         else {
             dstIndex = textureCacheFreeSpaces.back();
@@ -324,23 +324,63 @@ namespace RT64 {
         }
 
         return dstIndex;
+#endif
     }
 
-    uint32_t FramebufferRenderer::getFixedTextureSlot(uint32_t textureIndex) {
-        uint32_t &slot = textureCacheSlotMap[textureIndex];
-        if (slot != UINT32_MAX) {
-            return slot;
+    uint32_t FramebufferRenderer::acquireFixedTextureSlot(uint64_t key, const RenderTexture *texture, const RenderTextureView *view) {
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+        uint32_t slotIndex = 0;
+        uint64_t oldestUse = UINT64_MAX;
+        for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+            auto &slot = fixedTextureSlots[i];
+            if (slot.occupied && slot.key == key) {
+                slotIndex = i;
+                break;
+            }
+            if (!slot.occupied) {
+                slotIndex = i;
+                oldestUse = 0;
+                break;
+            }
+            if (slot.lastUse < oldestUse) {
+                oldestUse = slot.lastUse;
+                slotIndex = i;
+            }
         }
 
-        slot = getDestinationIndex();
-        textureCacheMappedIndices.push_back(textureIndex);
-        return slot;
+        auto &slot = fixedTextureSlots[slotIndex];
+        const bool descriptorChanged = !slot.occupied || slot.key != key || slot.texture != texture || slot.view != view;
+        slot.key = key;
+        slot.texture = texture;
+        slot.view = view;
+        slot.lastUse = ++fixedTextureUseSerial;
+        slot.occupied = true;
+        if (descriptorChanged && descTextureSet != nullptr) {
+            descTextureSet->setTexture(slotIndex, texture != nullptr ? texture : dummyColorTarget.get(),
+                RenderTextureLayout::SHADER_READ, view);
+        }
+        return slotIndex;
+#else
+        (void)key;
+        (void)texture;
+        (void)view;
+        return getDestinationIndex();
+#endif
     }
     
     uint32_t FramebufferRenderer::getTextureIndex(RenderTarget *renderTarget) {
         assert(renderTarget != nullptr);
 
-        uint32_t dstIndex = getDestinationIndex();
+        uint32_t dstIndex;
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+        const auto texture = renderTarget->getResolvedTexture();
+        const auto view = renderTarget->getResolvedTextureView();
+        const uint64_t key = static_cast<uint64_t>(reinterpret_cast<uintptr_t>(texture)) ^
+            (static_cast<uint64_t>(reinterpret_cast<uintptr_t>(view)) >> 4);
+        dstIndex = acquireFixedTextureSlot(key, texture, view);
+#else
+        dstIndex = getDestinationIndex();
+#endif
         dynamicTextureViewVector.emplace_back(DynamicTextureView{ renderTarget->getResolvedTexture(), dstIndex, renderTarget->getResolvedTextureView()});
         return dstIndex;
     }
@@ -348,7 +388,12 @@ namespace RT64 {
     uint32_t FramebufferRenderer::getTextureIndex(const FramebufferManager::TileCopy &tileCopy) {
         assert(tileCopy.texture != nullptr);
 
-        uint32_t dstIndex = getDestinationIndex();
+        uint32_t dstIndex;
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+        dstIndex = acquireFixedTextureSlot(static_cast<uint64_t>(reinterpret_cast<uintptr_t>(tileCopy.texture.get())), tileCopy.texture.get());
+#else
+        dstIndex = getDestinationIndex();
+#endif
         dynamicTextureViewVector.emplace_back(DynamicTextureView{ tileCopy.texture.get(), dstIndex, nullptr });
         dynamicTextureBarrierVector.emplace_back(RenderTextureBarrier(tileCopy.texture.get(), RenderTextureLayout::SHADER_READ));
         return dstIndex;
@@ -358,32 +403,34 @@ namespace RT64 {
         assert(worker != nullptr);
         assert(drawBuffers != nullptr);
         
-        const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
+        const bool createSet =
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+            (descTextureSet == nullptr);
+#else
+            (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
+#endif
         if (createSet) {
-            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, ((textureCacheSize + 1) * 3) / 2);
+            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device,
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+                RT64_TEXTURE_ARRAY_SIZE_FIXED
+#else
+                ((textureCacheSize + 1) * 3) / 2
+#endif
+            );
         }
 
 #if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
-        // PARTIALLY_BOUND is unavailable on this device. Initialize every fixed
-        // descriptor slot with a valid image before replacing live cache slots.
-        for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
-            descTextureSet->setTexture(i, dummyColorTarget.get(), RenderTextureLayout::SHADER_READ,
-                dummyColorTargetView.get());
-        }
-
-        for (uint32_t textureIndex : textureCacheMappedIndices) {
-            const uint32_t slot = textureCacheSlotMap[textureIndex];
-            if (textureCacheTextures[textureIndex] == nullptr) {
-                continue;
+        if (createSet) {
+            for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+                descTextureSet->setTexture(i, dummyColorTarget.get(), RenderTextureLayout::SHADER_READ,
+                    dummyColorTargetView.get());
             }
-            if (textureCacheReplacementMapEnabled && (textureCacheTextureReplacements[textureIndex] != nullptr)) {
-                descTextureSet->setTexture(slot, textureCacheTextureReplacements[textureIndex]->texture.get(), RenderTextureLayout::SHADER_READ);
-            }
-            else if (textureCacheTextures[textureIndex]->texture != nullptr) {
-                descTextureSet->setTexture(slot, textureCacheTextures[textureIndex]->texture.get(), RenderTextureLayout::SHADER_READ);
-            }
-            else {
-                descTextureSet->setTexture(slot, textureCacheTextures[textureIndex]->tmem.get(), RenderTextureLayout::SHADER_READ);
+            for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+                const auto &slot = fixedTextureSlots[i];
+                if (slot.occupied) {
+                    descTextureSet->setTexture(i, slot.texture != nullptr ? slot.texture : dummyColorTarget.get(),
+                        RenderTextureLayout::SHADER_READ, slot.view);
+                }
             }
         }
 #endif

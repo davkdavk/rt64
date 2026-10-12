@@ -66,11 +66,7 @@ namespace RT64 {
         std::vector<Texture *> textureCacheTextures;
         std::vector<Texture *> textureCacheTextureReplacements;
         std::vector<uint32_t> textureCacheFreeSpaces;
-        std::vector<uint32_t> textureCacheSlotMap;
-        std::vector<uint32_t> textureCacheMappedIndices;
-        std::vector<bool> textureCacheUsedSlots;
         uint32_t textureCacheSize = 0;
-        uint32_t textureCacheEvictionCursor = 0;
         uint32_t textureCacheGlobalVersion = 0;
         bool textureCacheReplacementMapEnabled = false;
         std::vector<InstanceDrawCall> instanceDrawCallVector;
@@ -78,6 +74,17 @@ namespace RT64 {
         std::vector<interop::RenderIndices> renderIndicesVector;
         std::vector<DynamicTextureView> dynamicTextureViewVector;
         std::vector<RenderTextureBarrier> dynamicTextureBarrierVector;
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+        struct FixedTextureSlot {
+            uint64_t key = 0;
+            const RenderTexture *texture = nullptr;
+            const RenderTextureView *view = nullptr;
+            uint64_t lastUse = 0;
+            bool occupied = false;
+        };
+        std::array<FixedTextureSlot, RT64_TEXTURE_ARRAY_SIZE_FIXED> fixedTextureSlots{};
+        uint64_t fixedTextureUseSerial = 0;
+#endif
         std::unique_ptr<BufferUploader> shaderUploader;
         std::vector<RSPSmoothNormalGenerationCB> rspSmoothNormalVector;
         std::array<RenderInputSlot, 3> vertexInputSlots;
@@ -167,7 +174,7 @@ namespace RT64 {
         void updateTextureCache(TextureCache *textureCache);
         void createGPUTiles(const DrawCallTile *callTiles, uint32_t callTileCount, interop::GPUTile *dstGPUTiles, const FramebufferManager *fbManager, TextureCache *textureCache, uint64_t submissionFrame);
         uint32_t getDestinationIndex();
-        uint32_t getFixedTextureSlot(uint32_t textureIndex);
+        uint32_t acquireFixedTextureSlot(uint64_t key, const RenderTexture *texture, const RenderTextureView *view = nullptr);
         uint32_t getTextureIndex(RenderTarget *renderTarget);
         uint32_t getTextureIndex(const FramebufferManager::TileCopy &tileCopy);
         void updateMultisampling();
