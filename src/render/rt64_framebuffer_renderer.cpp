@@ -174,7 +174,9 @@ namespace RT64 {
     
     void FramebufferRenderer::resetFramebuffers(RenderWorker *worker, bool ubershadersVisible, float ditherNoiseStrength, const RenderMultisampling &multisampling) {
         instanceDrawCallVector.clear();
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
         if (waterRenderer) waterRenderer->reset();
+#endif
         hitGroupVector.clear();
         renderIndicesVector.clear();
         rspSmoothNormalVector.clear();
@@ -583,6 +585,7 @@ namespace RT64 {
             }
         };
 
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
         auto finishWater = [&]() {
             if (activeWaterDraw==UINT32_MAX) return;
             const auto &scene=waterRenderer->scenes[waterRenderer->drawScenes[activeWaterDraw]];
@@ -596,6 +599,7 @@ namespace RT64 {
             activeWaterDraw=UINT32_MAX;
             switchToGraphicsPipeline();
         };
+#endif
 
         if (fbStorage->colorTarget != nullptr) {
             switchToGraphicsPipeline();
@@ -603,12 +607,14 @@ namespace RT64 {
         
         for (uint32_t i : rasterScene.instanceIndices) {
             const InstanceDrawCall &drawCall = instanceDrawCallVector[i];
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
             const uint32_t waterScene = drawCall.waterIndex == UINT32_MAX ? UINT32_MAX : waterRenderer->drawScenes[drawCall.waterIndex];
             if (activeWaterDraw!=UINT32_MAX && waterScene!=waterRenderer->drawScenes[activeWaterDraw]) finishWater();
             if (waterProfileToken != UINT32_MAX && waterScene != waterProfileScene) {
                 waterRenderer->endProfile(worker,waterProfileToken);
                 waterProfileToken = UINT32_MAX;
             }
+#endif
             switch (drawCall.type) {
             case InstanceDrawCall::Type::IndexedTriangles: 
             case InstanceDrawCall::Type::RawTriangles:
@@ -661,6 +667,7 @@ namespace RT64 {
                     previousScissor = triangles.scissor;
                 }
 
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
                 if (drawCall.waterIndex != UINT32_MAX) {
                     if (waterRenderer->captureScene(worker,drawCall.waterIndex,depthState)) {
                         worker->commandList->setFramebuffer(depthState ? fbStorage->colorWriteDepthRead.get() : fbStorage->colorDepthWrite.get());
@@ -726,6 +733,7 @@ namespace RT64 {
                     switchToGraphicsPipeline();
                     break;
                 }
+#endif
 
                 if (previousPipeline != triangles.pipeline) {
                     worker->commandList->setPipeline(triangles.pipeline);
@@ -799,8 +807,10 @@ namespace RT64 {
             }
         }
 
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
         finishWater();
         if (waterProfileToken != UINT32_MAX) waterRenderer->endProfile(worker,waterProfileToken);
+#endif
 
         // Mark targets for resolve.
         if (fbStorage->colorTarget != nullptr) {
@@ -1368,8 +1378,10 @@ namespace RT64 {
             rspProcessor->recordCommandList(worker, shaderLibrary, outputBuffers);
         }
 
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
         if (waterRenderer && !waterRenderer->draws.empty()) waterRenderer->recordNormals(worker, *outputBuffers);
         if (waterRenderer && !waterRenderer->draws.empty()) waterRenderer->recordField(worker);
+#endif
 
         if (vertexProcessor != nullptr) {
             vertexProcessor->recordCommandList(worker, shaderLibrary, outputBuffers);
@@ -1895,6 +1907,7 @@ namespace RT64 {
                     }
                 }
 
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
                 const bool wantsWater = call.callDesc.waterMaterial.identity.x > 0.0f &&
                     instanceDrawCall.type == InstanceDrawCall::Type::IndexedTriangles && p.fbStorage->colorTarget && p.fbStorage->depthTarget;
                 if (wantsWater && !waterRenderer && !waterUnavailable) {
@@ -2024,6 +2037,7 @@ namespace RT64 {
                         waterRenderer->worldView = RenderVertexBufferView(RenderBufferReference(outputBuffers.rasterWorldPosBuffer.buffer.get()), PosStride * vertexCount);
                     }
                 }
+#endif
 
                 // Determine to use the draw call either in the RT scene or the raster scene.
                 const uint32_t instanceIndex = static_cast<uint32_t>(instanceDrawCallVector.size());
@@ -2151,6 +2165,7 @@ namespace RT64 {
         }
 #   endif
 
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
         if (waterRenderer && !waterRenderer->draws.empty()) {
             waterRenderer->prepareField(worker);
             waterRenderer->prepareNormals(worker, *outputBuffers, shaderUploads);
@@ -2158,6 +2173,7 @@ namespace RT64 {
         }
         shaderUploader->submit(worker, shaderUploads);
         if (waterRenderer && !waterRenderer->draws.empty()) { waterRenderer->bindBuffer(); waterRenderer->bindNormals(*outputBuffers); }
+#endif
         updateShaderViews(worker, drawBuffers, outputBuffers, shaderViewRtEnabled);
     }
 

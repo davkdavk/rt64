@@ -393,7 +393,6 @@ set (SOURCES
 
     "${PROJECT_SOURCE_DIR}/src/render/rt64_buffer_uploader.cpp"
     "${PROJECT_SOURCE_DIR}/src/render/rt64_framebuffer_renderer.cpp"
-    "${PROJECT_SOURCE_DIR}/src/render/rt64_water_renderer.cpp"
     "${PROJECT_SOURCE_DIR}/src/render/rt64_geometry_mode.cpp"
     "${PROJECT_SOURCE_DIR}/src/render/rt64_look_at_processor.cpp"
     "${PROJECT_SOURCE_DIR}/src/render/rt64_native_target.cpp"
@@ -437,6 +436,10 @@ set (SOURCES
     "${PROJECT_SOURCE_DIR}/src/contrib/implot/implot_items.cpp"
     "${PROJECT_SOURCE_DIR}/src/contrib/miniz/miniz.c"
 )
+
+if (NOT (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
+    list(APPEND SOURCES "${PROJECT_SOURCE_DIR}/src/render/rt64_water_renderer.cpp")
+endif()
 
 include_directories(
     "${SDL2_INCLUDE_DIRS}"
@@ -561,6 +564,7 @@ build_pixel_shader(  rt64 "src/shaders/PostBlendDitherNoisePS.hlsl" "src/shaders
 build_pixel_shader(  rt64 "src/shaders/PostBlendDitherNoisePS.hlsl" "src/shaders/PostBlendDitherNoiseSubNegativePS.hlsl" "-D SUB_MODE" "-D NEGATIVE_MODE")
 build_compute_shader(rt64 "src/shaders/RSPModifyCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPProcessCS.hlsl")
+if (NOT (ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Android"))
 build_vertex_shader(rt64 "src/shaders/WaterVS.hlsl")
 build_pixel_shader(rt64 "src/shaders/WaterPS.hlsl")
 build_pixel_shader(rt64 "src/shaders/WaterPS.hlsl" "src/shaders/WaterClassicPS.hlsl" "-D" "CLASSIC_STYLE")
@@ -577,6 +581,7 @@ build_pixel_shader(rt64 "src/shaders/WaterSurfacePS.hlsl")
 build_vertex_shader(rt64 "src/shaders/WaterSprayVS.hlsl")
 build_pixel_shader(rt64 "src/shaders/WaterSprayPS.hlsl")
 build_pixel_shader(rt64 "src/shaders/WaterSprayPS.hlsl" "src/shaders/WaterSprayMSPS.hlsl" "-D" "SPRAY_MSAA")
+endif()
 build_compute_shader(rt64 "src/shaders/RSPWorldCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPSmoothNormalCS.hlsl")
 build_compute_shader(rt64 "src/shaders/RSPVertexTestZCS.hlsl")

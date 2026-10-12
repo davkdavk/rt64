@@ -890,6 +890,7 @@ namespace RT64 {
             queryPool->queryResults();
             const uint64_t *frameTimestamps = queryPool->getResults();
             rendererGPUProfiler.log(double(frameTimestamps[1] - frameTimestamps[0]) / 1000000.0);
+#if !defined(WR64_ANDROID_NO_MODERN_WATER)
             static FILE *waterFrameProfile=[]() {
                 const char *name=std::getenv("WR64_FRAME_PROFILE");
                 FILE *f=name ? std::fopen(name,"w") : nullptr;
@@ -913,6 +914,7 @@ namespace RT64 {
             if (framebufferRenderer->waterRenderer) {
                 framebufferRenderer->waterRenderer->finishProfile(double(frameTimestamps[1]-frameTimestamps[0])/1000000.0);
             }
+#endif
 
             // Indicate to the texture cache it's safe to delete the textures if no locks are active.
             ext.textureCache->decrementLock();
