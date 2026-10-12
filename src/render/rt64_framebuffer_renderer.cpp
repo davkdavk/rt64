@@ -227,6 +227,10 @@ namespace RT64 {
         textureCacheSize = std::min(textureCacheSize, uint32_t(RT64_TEXTURE_ARRAY_SIZE_FIXED));
         textureCacheFreeSpaces.erase(std::remove_if(textureCacheFreeSpaces.begin(), textureCacheFreeSpaces.end(),
             [](uint32_t index) { return index >= RT64_TEXTURE_ARRAY_SIZE_FIXED; }), textureCacheFreeSpaces.end());
+        textureCacheSlotMap.assign(textureCacheTextures.size(), UINT32_MAX);
+        textureCacheMappedIndices.clear();
+        textureCacheUsedSlots.assign(RT64_TEXTURE_ARRAY_SIZE_FIXED, false);
+        textureCacheEvictionCursor = 0;
 #endif
         textureCacheGlobalVersion = textureCache->textureMap.globalVersion;
         textureCacheReplacementMapEnabled = textureCache->textureMap.replacementMapEnabled;
@@ -271,6 +275,12 @@ namespace RT64 {
                 bool shiftedByHalf = false;
                 textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
 
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+                if (textureIndex < textureCacheSlotMap.size()) {
+                    textureIndex = getFixedTextureSlot(textureIndex);
+                }
+#endif
+
                 // Describe the GPU tile for a regular texture.
                 gpuTile.ulScale.x = gpuTile.tcScale.x;
                 gpuTile.ulScale.y = gpuTile.tcScale.y;
@@ -289,15 +299,19 @@ namespace RT64 {
 
     uint32_t FramebufferRenderer::getDestinationIndex() {
         uint32_t dstIndex;
+#if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
+        for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+            const uint32_t candidate = (textureCacheEvictionCursor + i) % RT64_TEXTURE_ARRAY_SIZE_FIXED;
+            if (!textureCacheUsedSlots[candidate]) {
+                textureCacheUsedSlots[candidate] = true;
+                textureCacheEvictionCursor = (candidate + 1) % RT64_TEXTURE_ARRAY_SIZE_FIXED;
+                return candidate;
+            }
+        }
+#endif
         if (textureCacheFreeSpaces.empty()) {
 #if defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
-            static uint64_t evictionCount = 0;
             dstIndex = textureCacheEvictionCursor++ % RT64_TEXTURE_ARRAY_SIZE_FIXED;
-            ++evictionCount;
-            if ((evictionCount == 1) || ((evictionCount % 60) == 0)) {
-                fprintf(stderr, "RT64 texture cache eviction count=%llu slot=%u\n",
-                    static_cast<unsigned long long>(evictionCount), dstIndex);
-            }
 #else
             dstIndex = textureCacheSize++;
 #endif
@@ -308,6 +322,17 @@ namespace RT64 {
         }
 
         return dstIndex;
+    }
+
+    uint32_t FramebufferRenderer::getFixedTextureSlot(uint32_t textureIndex) {
+        uint32_t &slot = textureCacheSlotMap[textureIndex];
+        if (slot != UINT32_MAX) {
+            return slot;
+        }
+
+        slot = getDestinationIndex();
+        textureCacheMappedIndices.push_back(textureIndex);
+        return slot;
     }
     
     uint32_t FramebufferRenderer::getTextureIndex(RenderTarget *renderTarget) {
@@ -342,6 +367,22 @@ namespace RT64 {
         for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
             descTextureSet->setTexture(i, dummyColorTarget.get(), RenderTextureLayout::SHADER_READ,
                 dummyColorTargetView.get());
+        }
+
+        for (uint32_t textureIndex : textureCacheMappedIndices) {
+            const uint32_t slot = textureCacheSlotMap[textureIndex];
+            if (textureCacheTextures[textureIndex] == nullptr) {
+                continue;
+            }
+            if (textureCacheReplacementMapEnabled && (textureCacheTextureReplacements[textureIndex] != nullptr)) {
+                descTextureSet->setTexture(slot, textureCacheTextureReplacements[textureIndex]->texture.get(), RenderTextureLayout::SHADER_READ);
+            }
+            else if (textureCacheTextures[textureIndex]->texture != nullptr) {
+                descTextureSet->setTexture(slot, textureCacheTextures[textureIndex]->texture.get(), RenderTextureLayout::SHADER_READ);
+            }
+            else {
+                descTextureSet->setTexture(slot, textureCacheTextures[textureIndex]->tmem.get(), RenderTextureLayout::SHADER_READ);
+            }
         }
 #endif
 
@@ -413,7 +454,9 @@ namespace RT64 {
 
         // Update texture vector with static textures from the cache and dynamic resource views.
         if (descriptorTextureGlobalVersion != textureCacheGlobalVersion) {
-            const uint32_t textureVersionSize = static_cast<uint32_t>(textureCacheVersions.size());
+            const uint32_t textureVersionSize = std::min(
+                static_cast<uint32_t>(textureCacheVersions.size()), textureCacheSize);
+#if !defined(WR64_ANDROID_NO_DESCRIPTOR_INDEXING)
             for (uint32_t i = 0; i < textureVersionSize; i++) {
                 if (textureCacheVersions[i] == descriptorTextureVersions[i]) {
                     continue;
@@ -434,6 +477,7 @@ namespace RT64 {
                     descTextureSet->setTexture(i, textureCacheTextures[i]->tmem.get(), RenderTextureLayout::SHADER_READ);
                 }
             }
+#endif
 
             descriptorTextureGlobalVersion = textureCacheGlobalVersion;
         }

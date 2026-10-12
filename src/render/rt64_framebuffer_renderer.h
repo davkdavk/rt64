@@ -64,6 +64,9 @@ namespace RT64 {
         std::vector<Texture *> textureCacheTextures;
         std::vector<Texture *> textureCacheTextureReplacements;
         std::vector<uint32_t> textureCacheFreeSpaces;
+        std::vector<uint32_t> textureCacheSlotMap;
+        std::vector<uint32_t> textureCacheMappedIndices;
+        std::vector<bool> textureCacheUsedSlots;
         uint32_t textureCacheSize = 0;
         uint32_t textureCacheEvictionCursor = 0;
         uint32_t textureCacheGlobalVersion = 0;
@@ -160,6 +163,7 @@ namespace RT64 {
         void updateTextureCache(TextureCache *textureCache);
         void createGPUTiles(const DrawCallTile *callTiles, uint32_t callTileCount, interop::GPUTile *dstGPUTiles, const FramebufferManager *fbManager, TextureCache *textureCache, uint64_t submissionFrame);
         uint32_t getDestinationIndex();
+        uint32_t getFixedTextureSlot(uint32_t textureIndex);
         uint32_t getTextureIndex(RenderTarget *renderTarget);
         uint32_t getTextureIndex(const FramebufferManager::TileCopy &tileCopy);
         void updateMultisampling();
