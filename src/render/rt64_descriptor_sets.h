@@ -10,6 +10,7 @@
 
 #include "common/rt64_common.h"
 #include "common/rt64_plume.h"
+#include "shared/rt64_texture_array.h"
 
 #include "rt64_sampler_library.h"
 
@@ -291,19 +292,22 @@ namespace RT64 {
     };
 
     struct FramebufferRendererDescriptorTextureSet : RenderDescriptorSetBase {
-        static const int UpperRange = 8192;
+        static const int UpperRange = RT64_TEXTURE_ARRAY_SIZE_BOUNDLESS;
+        static const int UpperRangeFixed = RT64_TEXTURE_ARRAY_SIZE_FIXED;
 
         uint32_t textureCacheSize = 0;
         uint32_t gTextures;
         uint32_t gTMEM;
+        bool boundless = true;
 
         FramebufferRendererDescriptorTextureSet(RenderDevice *device = nullptr, uint32_t textureCacheSize = 0) {
             this->textureCacheSize = textureCacheSize;
+            boundless = (device == nullptr) || device->getCapabilities().descriptorIndexing;
 
             builder.begin();
-            gTextures = builder.addTexture(0, UpperRange);
+            gTextures = builder.addTexture(0, boundless ? UpperRange : UpperRangeFixed);
             gTMEM = gTextures;
-            builder.end(true, textureCacheSize);
+            builder.end(boundless, boundless ? textureCacheSize : 0);
 
             if (device != nullptr) {
                 create(device);

@@ -219,6 +219,66 @@ namespace RT64 {
         textureCacheSize = static_cast<uint32_t>(textureCacheTextures.size());
         textureCacheGlobalVersion = textureCache->textureMap.globalVersion;
         textureCacheReplacementMapEnabled = textureCache->textureMap.replacementMapEnabled;
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+        for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+            FixedTextureSlot &slot = fixedTextureSlots[i];
+            if (!slot.occupied) {
+                continue;
+            }
+
+            if (slot.key == 2 || slot.key == 3) {
+                slot.occupied = false;
+                slot.key = 0;
+                slot.identity0 = nullptr;
+                slot.identity1 = nullptr;
+                slot.cacheIndex = UINT32_MAX;
+                slot.texture = dummyColorTarget.get();
+                slot.view = dummyColorTargetView.get();
+                if (std::find(fixedTextureDirtySlots.begin(), fixedTextureDirtySlots.end(), i) == fixedTextureDirtySlots.end()) {
+                    fixedTextureDirtySlots.push_back(i);
+                }
+                continue;
+            }
+            if (slot.key != 1) continue;
+
+            Texture *cacheTexture = slot.cacheIndex < textureCacheTextures.size()
+                ? textureCacheTextures[slot.cacheIndex] : nullptr;
+            const RenderTexture *residentTexture = nullptr;
+            if (cacheTexture != nullptr && textureCacheReplacementMapEnabled &&
+                slot.cacheIndex < textureCacheTextureReplacements.size() && textureCacheTextureReplacements[slot.cacheIndex] != nullptr) {
+                residentTexture = textureCacheTextureReplacements[slot.cacheIndex]->texture.get();
+            }
+            else if (cacheTexture != nullptr && cacheTexture->texture != nullptr) {
+                residentTexture = cacheTexture->texture.get();
+            }
+            else if (cacheTexture != nullptr) {
+                residentTexture = cacheTexture->tmem.get();
+            }
+
+            bool descriptorChanged = false;
+            if (cacheTexture == nullptr) {
+                descriptorChanged = slot.key != 0 || slot.texture != dummyColorTarget.get() || slot.view != dummyColorTargetView.get();
+                slot.occupied = false;
+                slot.key = 0;
+                slot.identity0 = nullptr;
+                slot.identity1 = nullptr;
+                slot.cacheIndex = UINT32_MAX;
+                slot.texture = dummyColorTarget.get();
+                slot.view = dummyColorTargetView.get();
+            }
+            else {
+                descriptorChanged = slot.identity0 != cacheTexture || slot.cacheIndex != i ||
+                    slot.texture != residentTexture || slot.view != nullptr;
+                slot.identity0 = cacheTexture;
+                slot.cacheIndex = i;
+                slot.texture = residentTexture;
+                slot.view = nullptr;
+            }
+            if (descriptorChanged && std::find(fixedTextureDirtySlots.begin(), fixedTextureDirtySlots.end(), i) == fixedTextureDirtySlots.end()) {
+                fixedTextureDirtySlots.push_back(i);
+            }
+        }
+#endif
         dynamicTextureViewVector.clear();
         dynamicTextureBarrierVector.clear();
     }
@@ -258,7 +318,28 @@ namespace RT64 {
                 bool textureReplaced = false;
                 bool hasMipmaps = false;
                 bool shiftedByHalf = false;
-                textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex, gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
+                const bool textureFound = textureCache->useTexture(callTile.tmemHashOrID, submissionFrame, textureIndex,
+                    gpuTile.tcScale, gpuTile.textureDimensions, textureReplaced, hasMipmaps, shiftedByHalf);
+
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+                if (textureFound && textureIndex < textureCacheTextures.size() && textureCacheTextures[textureIndex] != nullptr) {
+                    Texture *cacheTexture = textureCacheTextures[textureIndex];
+                    const RenderTexture *residentTexture = nullptr;
+                    if (textureReplaced && textureCacheTextureReplacements[textureIndex] != nullptr) {
+                        residentTexture = textureCacheTextureReplacements[textureIndex]->texture.get();
+                    }
+                    else if (cacheTexture->texture != nullptr) {
+                        residentTexture = cacheTexture->texture.get();
+                    }
+                    else {
+                        residentTexture = cacheTexture->tmem.get();
+                    }
+                    textureIndex = acquireFixedTextureSlot(1, cacheTexture, nullptr, residentTexture, nullptr, textureIndex);
+                }
+                else {
+                    textureIndex = acquireFixedTextureSlot(0, nullptr, nullptr, dummyColorTarget.get(), dummyColorTargetView.get());
+                }
+#endif
 
                 // Describe the GPU tile for a regular texture.
                 gpuTile.ulScale.x = gpuTile.tcScale.x;
@@ -277,6 +358,9 @@ namespace RT64 {
     }
 
     uint32_t FramebufferRenderer::getDestinationIndex() {
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+        return UINT32_MAX;
+#else
         uint32_t dstIndex;
         if (textureCacheFreeSpaces.empty()) {
             dstIndex = textureCacheSize++;
@@ -287,12 +371,62 @@ namespace RT64 {
         }
 
         return dstIndex;
+#endif
     }
+
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+    uint32_t FramebufferRenderer::acquireFixedTextureSlot(uint64_t key, const void *identity0, const void *identity1,
+        const RenderTexture *texture, const RenderTextureView *view, uint32_t cacheIndex) {
+        uint32_t slotIndex = 0;
+        uint64_t oldestUse = UINT64_MAX;
+        for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+            const FixedTextureSlot &slot = fixedTextureSlots[i];
+            if (slot.occupied && slot.key == key && slot.identity0 == identity0 && slot.identity1 == identity1 &&
+                slot.cacheIndex == cacheIndex) {
+                slotIndex = i;
+                oldestUse = UINT64_MAX;
+                break;
+            }
+            if (!slot.occupied) {
+                slotIndex = i;
+                oldestUse = 0;
+                break;
+            }
+            if (slot.lastUse < oldestUse) {
+                oldestUse = slot.lastUse;
+                slotIndex = i;
+            }
+        }
+
+        FixedTextureSlot &slot = fixedTextureSlots[slotIndex];
+        const bool descriptorChanged = !slot.occupied || slot.key != key || slot.identity0 != identity0 ||
+            slot.identity1 != identity1 || slot.cacheIndex != cacheIndex || slot.texture != texture || slot.view != view;
+        slot.key = key;
+        slot.identity0 = identity0;
+        slot.identity1 = identity1;
+        slot.cacheIndex = cacheIndex;
+        slot.texture = texture;
+        slot.view = view;
+        slot.lastUse = ++fixedTextureUseSerial;
+        slot.occupied = true;
+        if (descriptorChanged && std::find(fixedTextureDirtySlots.begin(), fixedTextureDirtySlots.end(), slotIndex) == fixedTextureDirtySlots.end()) {
+            fixedTextureDirtySlots.push_back(slotIndex);
+        }
+        return slotIndex;
+    }
+#endif
     
     uint32_t FramebufferRenderer::getTextureIndex(RenderTarget *renderTarget) {
         assert(renderTarget != nullptr);
 
-        uint32_t dstIndex = getDestinationIndex();
+        uint32_t dstIndex;
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+        const RenderTexture *texture = renderTarget->getResolvedTexture();
+        const RenderTextureView *view = renderTarget->getResolvedTextureView();
+        dstIndex = acquireFixedTextureSlot(2, texture, view, texture, view);
+#else
+        dstIndex = getDestinationIndex();
+#endif
         dynamicTextureViewVector.emplace_back(DynamicTextureView{ renderTarget->getResolvedTexture(), dstIndex, renderTarget->getResolvedTextureView()});
         return dstIndex;
     }
@@ -300,7 +434,12 @@ namespace RT64 {
     uint32_t FramebufferRenderer::getTextureIndex(const FramebufferManager::TileCopy &tileCopy) {
         assert(tileCopy.texture != nullptr);
 
-        uint32_t dstIndex = getDestinationIndex();
+        uint32_t dstIndex;
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+        dstIndex = acquireFixedTextureSlot(3, tileCopy.texture.get(), nullptr, tileCopy.texture.get());
+#else
+        dstIndex = getDestinationIndex();
+#endif
         dynamicTextureViewVector.emplace_back(DynamicTextureView{ tileCopy.texture.get(), dstIndex, nullptr });
         dynamicTextureBarrierVector.emplace_back(RenderTextureBarrier(tileCopy.texture.get(), RenderTextureLayout::SHADER_READ));
         return dstIndex;
@@ -310,10 +449,47 @@ namespace RT64 {
         assert(worker != nullptr);
         assert(drawBuffers != nullptr);
         
-        const bool createSet = (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
+        const bool createSet =
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+            (descTextureSet == nullptr);
+#else
+            (descTextureSet == nullptr) || (descTextureSet->textureCacheSize < (textureCacheSize + 1));
+#endif
         if (createSet) {
-            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device, ((textureCacheSize + 1) * 3) / 2);
+            descTextureSet = std::make_unique<FramebufferRendererDescriptorTextureSet>(worker->device,
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+                RT64_TEXTURE_ARRAY_SIZE_FIXED
+#else
+                ((textureCacheSize + 1) * 3) / 2
+#endif
+            );
         }
+
+#if defined(RT64_NO_DESCRIPTOR_INDEXING)
+        if (createSet) {
+            // Without PARTIALLY_BOUND every slot must be valid before binding the set.
+            for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+                descTextureSet->setTexture(i, dummyColorTarget.get(), RenderTextureLayout::SHADER_READ,
+                    dummyColorTargetView.get());
+            }
+            for (uint32_t i = 0; i < RT64_TEXTURE_ARRAY_SIZE_FIXED; i++) {
+                const FixedTextureSlot &slot = fixedTextureSlots[i];
+                if (slot.occupied) {
+                    descTextureSet->setTexture(i, slot.texture != nullptr ? slot.texture : dummyColorTarget.get(),
+                        RenderTextureLayout::SHADER_READ, slot.view);
+                }
+            }
+            fixedTextureDirtySlots.clear();
+        }
+        else {
+            for (uint32_t slotIndex : fixedTextureDirtySlots) {
+                const FixedTextureSlot &slot = fixedTextureSlots[slotIndex];
+                descTextureSet->setTexture(slotIndex, slot.texture != nullptr ? slot.texture : dummyColorTarget.get(),
+                    RenderTextureLayout::SHADER_READ, slot.view);
+            }
+        }
+        fixedTextureDirtySlots.clear();
+#endif
 
         if (createSet || (descriptorTextureReplacementMapEnabled != textureCacheReplacementMapEnabled)) {
             descriptorTextureVersions.clear();
@@ -384,6 +560,7 @@ namespace RT64 {
         // Update texture vector with static textures from the cache and dynamic resource views.
         if (descriptorTextureGlobalVersion != textureCacheGlobalVersion) {
             const uint32_t textureVersionSize = static_cast<uint32_t>(textureCacheVersions.size());
+#if !defined(RT64_NO_DESCRIPTOR_INDEXING)
             for (uint32_t i = 0; i < textureVersionSize; i++) {
                 if (textureCacheVersions[i] == descriptorTextureVersions[i]) {
                     continue;
@@ -404,14 +581,17 @@ namespace RT64 {
                     descTextureSet->setTexture(i, textureCacheTextures[i]->tmem.get(), RenderTextureLayout::SHADER_READ);
                 }
             }
+#endif
 
             descriptorTextureGlobalVersion = textureCacheGlobalVersion;
         }
 
+#if !defined(RT64_NO_DESCRIPTOR_INDEXING)
         for (const DynamicTextureView &dynamicView : dynamicTextureViewVector) {
             descTextureSet->setTexture(dynamicView.dstIndex, dynamicView.texture, RenderTextureLayout::SHADER_READ, dynamicView.textureView);
             descriptorTextureVersions[dynamicView.dstIndex] = 0;
         }
+#endif
     }
 
     void FramebufferRenderer::updateRSPSmoothNormalSet(RenderWorker *worker, const DrawBuffers *drawBuffers, const OutputBuffers *outputBuffers) {

@@ -101,11 +101,11 @@ float4 clampWrapMirrorSample(const RDPTile rdpTile, const GPUTile gpuTile, float
 
     // Check if tile requires TMEM decoding and sample using dynamic decoding.
     if (gpuTileUsesTMEM) {
-        return sampleTMEM(texelInt, rdpTile.siz, rdpTile.fmt, rdpTile.address, rdpTile.stride, tlut, rdpTile.palette, gTMEM[NonUniformResourceIndex(gpuTile.textureIndex)]);
+        return sampleTMEM(texelInt, rdpTile.siz, rdpTile.fmt, rdpTile.address, rdpTile.stride, tlut, rdpTile.palette, gTMEM[RT64_RESOURCE_INDEX(gpuTile.textureIndex)]);
     }
     // Sample the color version directly.
     else {
-        return gTextures[NonUniformResourceIndex(gpuTile.textureIndex)].Load(int3(texelInt, mipLevel));
+        return gTextures[RT64_RESOURCE_INDEX(gpuTile.textureIndex)].Load(int3(texelInt, mipLevel));
     }
 }
 
@@ -168,7 +168,7 @@ float4 sampleTextureLevel(const RDPTile rdpTile, const GPUTile gpuTile, bool fil
 #endif
     }
     else {
-        Texture2D texture = gTextures[NonUniformResourceIndex(gpuTile.textureIndex)];
+        Texture2D texture = gTextures[RT64_RESOURCE_INDEX(gpuTile.textureIndex)];
 #if USE_FOR_LOOPS
         int numSamples = select_uint(filtering, 4, 1);
         [unroll]
@@ -273,7 +273,7 @@ float4 sampleTexture(OtherMode otherMode, RenderFlags renderFlags, float2 inputU
     // Determine the RDP sample count and mip levels.
     if (flagHasMipmaps) {
         // Retrieve the dimensions of the texture for either type of sampler.
-        Texture2D texture = gTextures[NonUniformResourceIndex(gpuTile.textureIndex)];
+        Texture2D texture = gTextures[RT64_RESOURCE_INDEX(gpuTile.textureIndex)];
         if (nativeSampler == NATIVE_SAMPLER_NONE) {
             float2 ddxUVScaled = ddxUV * gpuTile.tcScale;
             float2 ddyUVScaled = ddyUV * gpuTile.tcScale;
